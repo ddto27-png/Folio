@@ -295,7 +295,7 @@ def tag_book(client: anthropic.Anthropic, title: str, author: str, description: 
 # ---------------------------------------------------------------------------
 
 def ingest_all(dry_run: bool = False) -> None:
-    db = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+    db = None if dry_run else create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
     ai = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
     books = SEED_BOOKS_DEDUPED
