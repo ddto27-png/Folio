@@ -10,6 +10,7 @@ export default function Home() {
   const [password, setPassword] = useState('')
   const [isSignUp, setIsSignUp] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [guestLoading, setGuestLoading] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -30,6 +31,18 @@ export default function Home() {
     if (error) {
       setError(error.message)
       setLoading(false)
+    } else {
+      router.push('/recommendations')
+    }
+  }
+
+  async function handleGuest() {
+    setGuestLoading(true)
+    setError('')
+    const { error } = await supabase.auth.signInAnonymously()
+    if (error) {
+      setError(error.message)
+      setGuestLoading(false)
     } else {
       router.push('/recommendations')
     }
@@ -74,6 +87,21 @@ export default function Home() {
             {isSignUp ? 'Already have an account? Sign in' : "Don't have an account? Sign up"}
           </button>
         </form>
+
+        <div className="flex items-center gap-3 my-5">
+          <div className="flex-1 h-px bg-gray-200" />
+          <span className="text-xs text-gray-400">or</span>
+          <div className="flex-1 h-px bg-gray-200" />
+        </div>
+
+        <button
+          onClick={handleGuest}
+          disabled={guestLoading}
+          className="w-full border border-gray-200 bg-white hover:bg-gray-50 text-gray-600 rounded-2xl py-3 text-sm font-medium transition disabled:opacity-50"
+        >
+          {guestLoading ? 'Loading…' : 'Continue as guest'}
+        </button>
+        <p className="text-center text-xs text-gray-400 mt-3">No account needed. Your reads are saved locally.</p>
       </div>
     </div>
   )

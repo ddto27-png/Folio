@@ -10,6 +10,7 @@ import { NavBar } from '@/components/NavBar'
 export default function RecommendationsPage() {
   const router = useRouter()
   const [userId, setUserId] = useState<string | null>(null)
+  const [isGuest, setIsGuest] = useState(false)
   const [books, setBooks] = useState<Recommendation[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -35,6 +36,7 @@ export default function RecommendationsPage() {
       }
       const uid = data.session.user.id
       setUserId(uid)
+      setIsGuest(data.session.user.is_anonymous ?? false)
       fetchRecs(uid)
     })
   }, [router, fetchRecs])
@@ -43,6 +45,17 @@ export default function RecommendationsPage() {
     <>
       <NavBar />
       <main className="max-w-2xl mx-auto px-4 py-8">
+        {isGuest && (
+          <div className="flex items-center justify-between bg-amber-50 border border-amber-100 rounded-xl px-4 py-3 mb-6 text-sm">
+            <span className="text-amber-800">You're browsing as a guest.</span>
+            <button
+              onClick={() => router.push('/')}
+              className="text-amber-600 font-semibold hover:text-amber-700 transition"
+            >
+              Create account →
+            </button>
+          </div>
+        )}
         <h2 className="font-serif text-2xl font-semibold text-gray-900 mb-1">For you</h2>
         <p className="text-sm text-gray-400 mb-6">Matched to your psychological needs right now.</p>
 
