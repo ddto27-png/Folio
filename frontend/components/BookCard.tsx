@@ -1,145 +1,79 @@
-import { View, Text, StyleSheet, Image, TouchableOpacity } from 'react-native'
-import { Recommendation } from '../lib/api'
-import { NeedTag } from './NeedTag'
-import { Colors } from '../constants/colors'
+'use client'
+
+import Image from 'next/image'
+import { useState } from 'react'
+import { NeedBadge } from './NeedBadge'
+import { LogReadModal } from './LogReadModal'
 
 interface Props {
-  book: Recommendation
-  onSave?: (bookId: string) => void
+  bookId: string
+  title: string
+  author: string | null
+  coverUrl: string | null
+  matchScore: number
+  topNeedIds: number[]
+  whyText: string
+  userId: string
+  onReadLogged?: () => void
 }
 
-export function BookCard({ book, onSave }: Props) {
-  const scorePercent = Math.round(book.match_score * 100)
+export function BookCard({ bookId, title, author, coverUrl, matchScore, topNeedIds, whyText, userId, onReadLogged }: Props) {
+  const [showModal, setShowModal] = useState(false)
+  const pct = Math.round(matchScore * 100)
 
   return (
-    <View style={styles.card}>
-      <View style={styles.row}>
-        {book.cover_url ? (
-          <Image source={{ uri: book.cover_url }} style={styles.cover} resizeMode="cover" />
-        ) : (
-          <View style={[styles.cover, styles.coverPlaceholder]}>
-            <Text style={styles.coverPlaceholderText}>📖</Text>
-          </View>
-        )}
+    <>
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 flex gap-4 hover:shadow-md transition">
+        <div className="flex-shrink-0">
+          {coverUrl ? (
+            <Image
+              src={coverUrl}
+              alt={title}
+              width={72}
+              height={108}
+              className="rounded-lg object-cover shadow-sm"
+              unoptimized
+            />
+          ) : (
+            <div className="w-[72px] h-[108px] rounded-lg bg-amber-50 flex items-center justify-center text-amber-300 text-2xl">
+              📖
+            </div>
+          )}
+        </div>
 
-        <View style={styles.meta}>
-          <Text style={styles.title} numberOfLines={2}>{book.title}</Text>
-          {book.author && <Text style={styles.author}>{book.author}</Text>}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-start justify-between gap-2 mb-0.5">
+            <h3 className="font-serif font-semibold text-gray-900 leading-snug">{title}</h3>
+            <span className="flex-shrink-0 text-xs font-semibold text-amber-600 bg-amber-50 px-2 py-0.5 rounded-full">
+              {pct}%
+            </span>
+          </div>
+          {author && <p className="text-sm text-gray-400 mb-2">{author}</p>}
 
-          <View style={styles.scoreRow}>
-            <View style={styles.scoreBar}>
-              <View style={[styles.scoreFill, { width: `${scorePercent}%` as any }]} />
-            </View>
-            <Text style={styles.scoreText}>{scorePercent}% match</Text>
-          </View>
-        </View>
-      </View>
+          <p className="text-sm text-gray-600 italic leading-relaxed mb-3">"{whyText}"</p>
 
-      <Text style={styles.whyText}>{book.why_text}</Text>
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {topNeedIds.map(id => <NeedBadge key={id} needId={id} />)}
+          </div>
 
-      <View style={styles.tags}>
-        {book.top_need_ids.map(id => <NeedTag key={id} needId={id} />)}
-      </View>
+          <button
+            onClick={() => setShowModal(true)}
+            className="text-xs font-medium text-gray-400 hover:text-amber-600 transition"
+          >
+            + I've read this
+          </button>
+        </div>
+      </div>
 
-      {onSave && (
-        <TouchableOpacity style={styles.saveButton} onPress={() => onSave(book.book_id)}>
-          <Text style={styles.saveText}>+ Save to wishlist</Text>
-        </TouchableOpacity>
+      {showModal && (
+        <LogReadModal
+          bookId={bookId}
+          bookTitle={title}
+          userId={userId}
+          onClose={() => setShowModal(false)}
+          onSaved={() => { setShowModal(false); onReadLogged?.() }}
+        />
       )}
-    </View>
+    </>
   )
 }
-
-const styles = StyleSheet.create({
-  card: {
-    backgroundColor: Colors.card,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 8,
-    elevation: 2,
-  },
-  row: {
-    flexDirection: 'row',
-    marginBottom: 12,
-  },
-  cover: {
-    width: 72,
-    height: 108,
-    borderRadius: 8,
-    marginRight: 14,
-  },
-  coverPlaceholder: {
-    backgroundColor: Colors.tag,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  coverPlaceholderText: {
-    fontSize: 28,
-  },
-  meta: {
-    flex: 1,
-    justifyContent: 'center',
-  },
-  title: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: Colors.text,
-    marginBottom: 4,
-    lineHeight: 22,
-  },
-  author: {
-    fontSize: 13,
-    color: Colors.textMuted,
-    marginBottom: 12,
-  },
-  scoreRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  scoreBar: {
-    flex: 1,
-    height: 4,
-    backgroundColor: Colors.border,
-    borderRadius: 2,
-    overflow: 'hidden',
-  },
-  scoreFill: {
-    height: '100%',
-    backgroundColor: Colors.primary,
-    borderRadius: 2,
-  },
-  scoreText: {
-    fontSize: 12,
-    color: Colors.primary,
-    fontWeight: '600',
-  },
-  whyText: {
-    fontSize: 14,
-    color: Colors.textMuted,
-    lineHeight: 20,
-    fontStyle: 'italic',
-    marginBottom: 12,
-  },
-  tags: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-  },
-  saveButton: {
-    marginTop: 8,
-    paddingVertical: 10,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: Colors.primary,
-    borderRadius: 10,
-  },
-  saveText: {
-    color: Colors.primary,
-    fontWeight: '600',
-    fontSize: 14,
-  },
-})

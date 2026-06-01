@@ -1,13 +1,4 @@
-const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:8000'
-
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    ...options,
-  })
-  if (!res.ok) throw new Error(`API error ${res.status}`)
-  return res.json()
-}
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 export interface Recommendation {
   book_id: string
@@ -29,20 +20,27 @@ export interface WishlistItem {
   need_ids_matched: number[] | null
 }
 
-export interface LogReadBody {
-  book_id: string
-  signal_type: string
-  pct_read?: number
-  emotional_state: number
+export async function getRecommendations(userId: string): Promise<Recommendation[]> {
+  const res = await fetch(`${API_URL}/users/${userId}/recommendations`)
+  if (!res.ok) throw new Error('Failed to fetch recommendations')
+  return res.json()
 }
 
-export const api = {
-  logRead: (userId: string, body: LogReadBody) =>
-    request(`/users/${userId}/reads`, { method: 'POST', body: JSON.stringify(body) }),
+export async function getWishlist(userId: string): Promise<WishlistItem[]> {
+  const res = await fetch(`${API_URL}/users/${userId}/wishlist`)
+  if (!res.ok) throw new Error('Failed to fetch wishlist')
+  return res.json()
+}
 
-  getRecommendations: (userId: string, limit = 10) =>
-    request<Recommendation[]>(`/users/${userId}/recommendations?limit=${limit}`),
-
-  getWishlist: (userId: string) =>
-    request<WishlistItem[]>(`/users/${userId}/wishlist`),
+export async function logRead(
+  userId: string,
+  data: { book_id: string; signal_type: string; pct_read: number; emotional_state: number }
+) {
+  const res = await fetch(`${API_URL}/users/${userId}/reads`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error('Failed to log read')
+  return res.json()
 }
