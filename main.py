@@ -1,6 +1,15 @@
 """
-Folio — FastAPI application
-Three endpoints that wrap the scoring engine and talk to Supabase.
+Folio — FastAPI backend
+=======================
+Five endpoints that connect the scoring engine (scoring.py) to the Supabase database
+and expose an HTTP API the Next.js frontend consumes.
+
+Endpoints:
+  GET  /books/search              — search catalog + Open Library live
+  POST /books/find-or-create      — add a new book to the catalog and tag it with Claude
+  POST /users/{user_id}/reads     — log a read event (triggers affinity refresh via DB trigger)
+  GET  /users/{user_id}/recommendations — run full scoring pipeline and return top books
+  GET  /users/{user_id}/wishlist  — return user's saved books ranked by match score
 """
 
 from __future__ import annotations
@@ -31,14 +40,18 @@ from scoring import (
 )
 
 # ---------------------------------------------------------------------------
-# Supabase + Anthropic clients
+# Supabase + Anthropic clients (lazy singletons)
 # ---------------------------------------------------------------------------
+# Both clients are created on first use so the app can start up even if the
+# environment variables aren't set yet (useful during local development).
 
 _supabase: Optional[Client] = None
 _anthropic: Optional[anthropic.Anthropic] = None
 
 
 def get_supabase() -> Client:
+    """Returns the shared Supabase client, creating it on first call.
+    Reads SUPABASE_URL and SUPABASE_KEY from environment variables."""
     global _supabase
     if _supabase is None:
         url = os.environ["SUPABASE_URL"]
@@ -48,6 +61,8 @@ def get_supabase() -> Client:
 
 
 def get_anthropic() -> anthropic.Anthropic:
+    """Returns the shared Anthropic client, creating it on first call.
+    Reads ANTHROPIC_API_KEY from environment variables."""
     global _anthropic
     if _anthropic is None:
         _anthropic = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
@@ -55,9 +70,11 @@ def get_anthropic() -> anthropic.Anthropic:
 
 
 # ---------------------------------------------------------------------------
-# Book tagging helpers (used by find-or-create endpoint)
+# Book tagging helpers (used by the find-or-create endpoint)
 # ---------------------------------------------------------------------------
 
+# Maps the need code strings used in scoring.py to the integer IDs in the
+# Supabase 'needs' table. Used when inserting book_need_tags rows.
 NEED_CODE_TO_ID: dict[str, int] = {
     "being_chosen": 1, "surviving": 2, "procedural_resolution": 3,
     "moral_complexity": 4, "power_agency": 5, "wound_visible": 6,
@@ -66,6 +83,8 @@ NEED_CODE_TO_ID: dict[str, int] = {
     "anxiety_named": 13,
 }
 
+# Human-readable descriptions of each need, passed to Claude Haiku in the
+# tagging prompt so it understands what each code means.
 _NEED_DESCRIPTIONS = {
     "being_chosen":          "Being perfectly chosen / unconditional romantic or familial love",
     "surviving":             "Surviving the unsurvivable / extreme resilience under catastrophe",
@@ -82,6 +101,8 @@ _NEED_DESCRIPTIONS = {
     "anxiety_named":         "Anxiety named and held / contemporary dread articulated and companioned",
 }
 
+# System prompt for Claude Haiku tagging. Instructs the model to return
+# only valid JSON with a 0–1 weight for each of the 13 needs.
 _TAGGING_SYSTEM = (
     "You are a literary psychologist. Given a book's title, author, and description, "
     "assign weights (0.0-1.0) reflecting how strongly it serves each of 13 psychological needs. "
@@ -90,6 +111,7 @@ _TAGGING_SYSTEM = (
     "Respond with valid JSON only - no explanation, no markdown fences."
 )
 
+# Template filled in per book and sent to Claude Haiku as the user message.
 _TAGGING_TEMPLATE = """Book: "{title}" by {author}
 Description: {description}
 
@@ -100,6 +122,9 @@ Return JSON: {{"being_chosen":0.0,"surviving":0.0,"procedural_resolution":0.0,"m
 
 
 def _tag_book(client: anthropic.Anthropic, title: str, author: str, description: str) -> dict:
+    """Calls Claude Haiku to assign psychological need weights to a book.
+    Returns a dict with one key per need (0–1 float) plus 'has_perpetrator' (bool).
+    Strips markdown fences in case the model wraps its JSON response in them."""
     needs_list = "\n".join(f"  {k}: {v}" for k, v in _NEED_DESCRIPTIONS.items())
     prompt = _TAGGING_TEMPLATE.format(
         title=title, author=author,
@@ -113,6 +138,7 @@ def _tag_book(client: anthropic.Anthropic, title: str, author: str, description:
         messages=[{"role": "user", "content": prompt}],
     )
     raw = msg.content[0].text.strip()
+    # Strip ```json ... ``` fences if the model added them despite instructions
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -121,6 +147,8 @@ def _tag_book(client: anthropic.Anthropic, title: str, author: str, description:
 
 
 def _ol_get(url: str) -> dict:
+    """Makes a GET request to the Open Library API and returns the JSON response.
+    Sets a Folio User-Agent header as Open Library requires identification."""
     req = urllib.request.Request(url, headers={"User-Agent": "Folio/1.0"})
     with urllib.request.urlopen(req, timeout=6) as resp:
         return json.loads(resp.read())
@@ -136,52 +164,59 @@ app = FastAPI(title="Folio", version="0.1.0")
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
+# Pydantic models define the shape of request bodies and response payloads.
+# FastAPI validates incoming data against these automatically.
 
 class ReadEventRequest(BaseModel):
+    """Body for POST /users/{user_id}/reads — what a user read and how they felt."""
     book_id: str
-    signal_type: str
-    pct_read: float = 1.0
-    emotional_state: int
-    occurred_at: Optional[datetime] = None
+    signal_type: str              # e.g. "star_5", "abandoned", "re_read"
+    pct_read: float = 1.0         # 0.0–1.0
+    emotional_state: int          # 1 (crisis) – 5 (joyful)
+    occurred_at: Optional[datetime] = None  # if omitted, defaults to now
     review_text: Optional[str] = None
 
 
 class RecommendationResponse(BaseModel):
+    """One book recommendation returned by GET /users/{user_id}/recommendations."""
     book_id: str
     title: str
     author: Optional[str]
     cover_url: Optional[str]
-    match_score: float
-    top_need_ids: list[int]
-    why_text: str
+    match_score: float        # 0–1, how well this book matches the reader right now
+    top_need_ids: list[int]   # the 1–2 needs driving this match (for NeedBadge display)
+    why_text: str             # Claude-generated explanation of why this book fits
 
 
 class WishlistItemResponse(BaseModel):
+    """One item from the user's wishlist, returned by GET /users/{user_id}/wishlist."""
     book_id: str
     title: str
     author: Optional[str]
     cover_url: Optional[str]
     match_score: Optional[float]
-    rank: Optional[int]
+    rank: Optional[int]              # position in the wishlist by current match score
     need_ids_matched: Optional[list[int]]
 
 
 class BookSearchResult(BaseModel):
-    id: Optional[str]
+    """One result from GET /books/search — could be from our catalog or Open Library."""
+    id: Optional[str]       # None if the book isn't in our catalog yet
     title: str
     author: Optional[str]
     cover_url: Optional[str]
     pub_year: Optional[int]
-    in_catalog: bool
-    ol_key: Optional[str]
+    in_catalog: bool        # True = already in our DB; False = from Open Library
+    ol_key: Optional[str]   # Open Library work key (e.g. "/works/OL123W"), used to fetch description
 
 
 class FindOrCreateBookRequest(BaseModel):
+    """Body for POST /books/find-or-create — minimal book metadata from the frontend."""
     title: str
     author: Optional[str] = None
     cover_url: Optional[str] = None
     pub_year: Optional[int] = None
-    ol_key: Optional[str] = None
+    ol_key: Optional[str] = None   # if provided, we fetch the description from Open Library
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +224,16 @@ class FindOrCreateBookRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _fetch_user_read_events(db: Client, user_id: str) -> list[ReadEvent]:
-    """Pull all read events for the user and hydrate book_need_weights."""
+    """Pulls all read events for a user from the 'reads' table and enriches
+    each one with the book's need weights from 'book_need_tags'.
+
+    Steps:
+      1. Fetch all read rows for the user
+      2. Collect all unique book IDs from those reads
+      3. Fetch need tags for those books
+      4. Build a lookup: book_id → {need_code: weight}
+      5. Assemble ReadEvent objects with the enriched weights
+    """
     rows = (
         db.table("reads")
         .select("book_id, signal_type, pct_read, emotional_state, occurred_at")
@@ -210,7 +254,7 @@ def _fetch_user_read_events(db: Client, user_id: str) -> list[ReadEvent]:
         .data
     )
 
-    # need_id (smallint) -> need code
+    # need_id (integer in DB) → need code string used by scoring engine
     need_codes = (
         db.table("needs")
         .select("id, code")
@@ -219,7 +263,7 @@ def _fetch_user_read_events(db: Client, user_id: str) -> list[ReadEvent]:
     )
     id_to_code = {n["id"]: n["code"] for n in need_codes}
 
-    # book_id -> {need_code: weight}
+    # Build per-book need weight lookup
     book_weights: dict[str, dict[str, float]] = {}
     for tag in tag_rows:
         bw = book_weights.setdefault(tag["book_id"], {})
@@ -230,6 +274,7 @@ def _fetch_user_read_events(db: Client, user_id: str) -> list[ReadEvent]:
     events: list[ReadEvent] = []
     for r in rows:
         occurred = datetime.fromisoformat(r["occurred_at"])
+        # Ensure timezone-aware so scoring engine comparisons work correctly
         if occurred.tzinfo is None:
             occurred = occurred.replace(tzinfo=timezone.utc)
         events.append(
@@ -246,7 +291,10 @@ def _fetch_user_read_events(db: Client, user_id: str) -> list[ReadEvent]:
 
 
 def _fetch_current_reading_state(db: Client, user_id: str) -> ReadingState:
-    """Return the user's current reading state, or a neutral fallback."""
+    """Fetches the user's current emotional state from 'reading_state'.
+    Falls back to a neutral state (3 = just okay) if none is recorded.
+    Converts active_need_ids from integer DB IDs to the need code strings
+    that the scoring engine expects."""
     row = (
         db.table("reading_state")
         .select("emotional_state, active_need_ids, captured_at")
@@ -264,7 +312,7 @@ def _fetch_current_reading_state(db: Client, user_id: str) -> ReadingState:
     if captured.tzinfo is None:
         captured = captured.replace(tzinfo=timezone.utc)
 
-    # active_need_ids stored as smallint[] -> convert to need codes
+    # Convert integer need IDs from the DB to code strings for scoring
     active_ids: list[int] = r.get("active_need_ids") or []
     if active_ids:
         code_rows = (
@@ -291,6 +339,10 @@ def _generate_why_text(
     book_description: str,
     persona_label: str = "a thoughtful reader",
 ) -> str:
+    """Calls Claude Haiku to generate a personalised 2-sentence explanation of
+    why this book matches this reader. Uses build_why_prompt() from scoring.py
+    to construct the prompt, then passes it to Claude Haiku (max 120 tokens).
+    The result is shown as the italic quote on each BookCard in the frontend."""
     prompt = build_why_prompt(persona_label, top_needs, book_title, book_description)
     client = get_anthropic()
     message = client.messages.create(
@@ -307,12 +359,23 @@ def _generate_why_text(
 
 @app.get("/books/search", response_model=list[BookSearchResult])
 async def search_books(q: str, limit: int = 8):
+    """Search for books by title. Returns up to `limit` results from two sources:
+
+    1. Our Supabase catalog (ilike search on title) — shown first.
+       These books already have need tags and can be logged immediately.
+    2. Open Library API — fills remaining slots if the catalog doesn't have enough matches.
+       These results have id=None and in_catalog=False; selecting one triggers find-or-create.
+
+    Results from both sources are deduped by title (case-insensitive).
+    Open Library is queried with their search.json endpoint, requesting only
+    the fields we need (key, title, author_name, cover_i, first_publish_year).
+    """
     if len(q.strip()) < 2:
         return []
 
     db = get_supabase()
 
-    # Search our catalog first
+    # Search our catalog first — these results come back with real IDs
     catalog = (
         db.table("books")
         .select("id, title, author, cover_url, pub_year")
@@ -326,35 +389,35 @@ async def search_books(q: str, limit: int = 8):
         {**r, "in_catalog": True, "ol_key": None} for r in catalog
     ]
 
-    # Fill remaining slots from Open Library
+    # Fill remaining slots from Open Library (live external API call)
     remaining = limit - len(results)
     if remaining > 0:
         try:
             qs = urllib.parse.urlencode({
-                "q": q, "limit": remaining + 5,
+                "q": q, "limit": remaining + 5,  # fetch a few extra to account for dedup
                 "fields": "key,title,author_name,cover_i,first_publish_year",
             })
             data = _ol_get(f"https://openlibrary.org/search.json?{qs}")
             for doc in data.get("docs", []):
                 title = doc.get("title", "")
                 if title.lower() in catalog_titles:
-                    continue
+                    continue  # skip duplicates already in our catalog
                 authors = doc.get("author_name", [])
                 cover_i = doc.get("cover_i")
                 results.append({
-                    "id": None,
+                    "id": None,   # not in our DB yet
                     "title": title,
                     "author": ", ".join(authors[:2]) if authors else None,
                     "cover_url": f"https://covers.openlibrary.org/b/id/{cover_i}-M.jpg" if cover_i else None,
                     "pub_year": doc.get("first_publish_year"),
                     "in_catalog": False,
-                    "ol_key": doc.get("key"),
+                    "ol_key": doc.get("key"),  # e.g. "/works/OL123W"
                 })
                 catalog_titles.add(title.lower())
                 if len(results) >= limit:
                     break
         except Exception:
-            pass
+            pass  # If Open Library is down, just return catalog results
 
     return results[:limit]
 
@@ -365,9 +428,24 @@ async def search_books(q: str, limit: int = 8):
 
 @app.post("/books/find-or-create")
 async def find_or_create_book(body: FindOrCreateBookRequest):
+    """Ensure a book exists in our catalog. Called when the user selects a book
+    from the onboarding search that isn't already in our DB (in_catalog=False).
+
+    Steps:
+      1. Check if a book with this title already exists (ilike match to handle
+         minor differences in capitalisation).
+      2. If not, fetch its description from Open Library using the ol_key.
+      3. Insert the book into the 'books' table.
+      4. Tag the book with Claude Haiku (assign 0–1 weights for all 13 needs).
+      5. Insert the tags into 'book_need_tags' so it can be scored immediately.
+
+    Returns the book row (id, title, author, cover_url).
+    Tagging errors are silently swallowed — the book is still usable, just
+    without need tags until the tags are added in a background process.
+    """
     db = get_supabase()
 
-    # Return existing book if already in catalog
+    # Return existing book if we already have it (avoid duplicates)
     existing = (
         db.table("books")
         .select("id, title, author, cover_url, pub_year")
@@ -379,7 +457,8 @@ async def find_or_create_book(body: FindOrCreateBookRequest):
     if existing:
         return existing[0]
 
-    # Fetch description from Open Library if we have a work key
+    # Fetch the book description from Open Library if we have a work key.
+    # The description field can be a plain string or a {"type","value"} object.
     description: Optional[str] = None
     if body.ol_key:
         try:
@@ -387,9 +466,9 @@ async def find_or_create_book(body: FindOrCreateBookRequest):
             raw = work.get("description")
             description = raw.get("value") if isinstance(raw, dict) else raw
         except Exception:
-            pass
+            pass  # description is optional; scoring still works without it
 
-    # Insert book
+    # Insert the book with whatever metadata we have
     row = {
         "title": body.title,
         "author": body.author,
@@ -404,7 +483,8 @@ async def find_or_create_book(body: FindOrCreateBookRequest):
     book = result.data[0]
     book_id = book["id"]
 
-    # Tag with Claude Haiku (synchronous - needed for scoring to work immediately)
+    # Tag the new book with Claude Haiku — this runs synchronously because the
+    # user is about to log this book and we need the tags for scoring to work.
     try:
         tags = _tag_book(get_anthropic(), body.title, body.author or "", description or "")
         has_perpetrator = tags.pop("has_perpetrator", None)
@@ -415,40 +495,48 @@ async def find_or_create_book(body: FindOrCreateBookRequest):
                 continue
             w = round(max(0.0, min(1.0, float(weight))), 3)
             if w == 0.0:
-                continue
+                continue  # don't store zero-weight tags
             entry = {"book_id": book_id, "need_id": need_id, "weight": w, "source": "llm"}
+            # has_perpetrator is stored only on the wound_visible tag
             if code == "wound_visible" and has_perpetrator is not None:
                 entry["has_perpetrator"] = has_perpetrator
             tag_rows.append(entry)
         if tag_rows:
             db.table("book_need_tags").insert(tag_rows).execute()
     except Exception:
-        pass  # Book exists; tags can be added later
+        pass  # Tagging failed — book exists, tags can be filled in later
 
     return book
 
 
 # ---------------------------------------------------------------------------
-# Endpoint 1 - Log a read event
+# Endpoint 1 — Log a read event
 # ---------------------------------------------------------------------------
 
 @app.post("/users/{user_id}/reads", status_code=201)
 async def log_read(user_id: str, body: ReadEventRequest):
+    """Persist a new read event to the 'reads' table.
+
+    A Supabase database trigger (trg_new_read) fires after every insert and
+    automatically recomputes the user's need_affinity scores and re-ranks
+    their wishlist — so the recommendation engine updates immediately.
+
+    The occurred_at field lets onboarding backdate past reads (e.g. 'I read
+    this a year ago') so the scoring engine can weight older reads correctly.
     """
-    Persist a read event. The Supabase trigger (trg_new_read) automatically
-    recomputes need_affinity and re-ranks the wishlist.
-    """
-    # Validate user exists
     db = get_supabase()
+
+    # Make sure the user exists in our public.users table
     user_check = db.table("users").select("id").eq("id", user_id).limit(1).execute()
     if not user_check.data:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Validate book exists
+    # Make sure the book is in our catalog
     book_check = db.table("books").select("id").eq("id", body.book_id).limit(1).execute()
     if not book_check.data:
         raise HTTPException(status_code=404, detail="Book not found")
 
+    # Use the provided timestamp, or default to right now
     occurred_at = body.occurred_at or datetime.now(timezone.utc)
 
     payload = {
@@ -470,35 +558,44 @@ async def log_read(user_id: str, body: ReadEventRequest):
 
 
 # ---------------------------------------------------------------------------
-# Endpoint 2 - Recommendations
+# Endpoint 2 — Recommendations
 # ---------------------------------------------------------------------------
 
 @app.get("/users/{user_id}/recommendations", response_model=list[RecommendationResponse])
 async def get_recommendations(user_id: str, limit: int = 10):
-    """
-    Run the full scoring pipeline and return the top `limit` book recommendations.
-    Why-text is generated via Claude Haiku.
+    """Run the full four-stage scoring pipeline and return the top `limit` books.
+
+    Steps:
+      1. Pull all the user's read events (with need weights attached).
+      2. Pull the user's current emotional state.
+      3. Compute need affinities from all reads (scoring.py Stages 1+2).
+      4. Modulate the affinity vector by current emotional state (Stage 3).
+      5. Fetch up to 200 unread candidate books from the catalog.
+      6. Score each candidate against the reader vector (Stage 4).
+      7. For each of the top results, call Claude Haiku to generate why_text.
+
+    Why-text is generated per request (not cached) — it reflects the reader's
+    current psychological state, which changes over time.
     """
     db = get_supabase()
 
-    # Check user
     user_check = db.table("users").select("id").eq("id", user_id).limit(1).execute()
     if not user_check.data:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Pull read events + reading state
+    # Pull full reading history + current emotional state
     events = _fetch_user_read_events(db, user_id)
     state = _fetch_current_reading_state(db, user_id)
 
-    # Compute affinities + modulate
+    # Run Stages 1–3: compute and modulate the reader's need profile
     now = datetime.now(timezone.utc)
     affinities = compute_all_affinities(events, now)
     reader_vector = modulate_for_state(affinities, state, now)
 
-    # Exclude already-read book_ids
+    # Don't recommend books the user has already read
     read_book_ids = list({e.book_id for e in events})
 
-    # Fetch candidate books (not yet read)
+    # Fetch candidate books (up to 200 to keep scoring fast)
     books_query = db.table("books").select("id, title, author, description, cover_url, ratings_count")
     if read_book_ids:
         books_query = books_query.not_.in_("id", read_book_ids)
@@ -509,7 +606,7 @@ async def get_recommendations(user_id: str, limit: int = 10):
 
     candidate_ids = [b["id"] for b in candidate_rows]
 
-    # Fetch need tags for candidates
+    # Fetch need tags for all candidate books in one query
     tag_rows = (
         db.table("book_need_tags")
         .select("book_id, need_id, weight")
@@ -517,10 +614,12 @@ async def get_recommendations(user_id: str, limit: int = 10):
         .execute()
         .data
     )
+    # Build ID↔code lookups for converting between DB integers and scoring engine strings
     need_codes = db.table("needs").select("id, code").execute().data
     id_to_code = {n["id"]: n["code"] for n in need_codes}
     code_to_id = {n["code"]: n["id"] for n in need_codes}
 
+    # Assemble per-book need weight dicts
     book_weights: dict[str, dict[str, float]] = {}
     for tag in tag_rows:
         bw = book_weights.setdefault(tag["book_id"], {})
@@ -528,14 +627,14 @@ async def get_recommendations(user_id: str, limit: int = 10):
         if code:
             bw[code] = float(tag["weight"])
 
-    # Build BookProfile list and score
+    # Build BookProfile objects and run Stage 4 (match_score) for each
     book_meta = {b["id"]: b for b in candidate_rows}
     profiles = [
         BookProfile(
             book_id=b["id"],
             need_weights=book_weights.get(b["id"], {}),
             ratings_count=int(b.get("ratings_count") or 0),
-            recently_read_overlap=0.0,
+            recently_read_overlap=0.0,  # novelty overlap not yet implemented
         )
         for b in candidate_rows
     ]
@@ -547,6 +646,7 @@ async def get_recommendations(user_id: str, limit: int = 10):
     scored.sort(key=lambda x: x[1], reverse=True)
     top = scored[:limit]
 
+    # Generate why_text for each top book via Claude Haiku
     results: list[RecommendationResponse] = []
     for profile, score, top_needs in top:
         meta = book_meta[profile.book_id]
@@ -572,18 +672,24 @@ async def get_recommendations(user_id: str, limit: int = 10):
 
 
 # ---------------------------------------------------------------------------
-# Endpoint 3 - Wishlist
+# Endpoint 3 — Wishlist
 # ---------------------------------------------------------------------------
 
 @app.get("/users/{user_id}/wishlist", response_model=list[WishlistItemResponse])
 async def get_wishlist(user_id: str):
-    """Return the user's wishlist sorted by match_score (rank asc)."""
+    """Return the user's saved wishlist books, sorted by their current match rank.
+
+    The wishlist table is maintained by a Supabase function (rank_wishlist)
+    that runs via the trg_new_read trigger whenever the user logs a read.
+    This endpoint just reads the pre-computed results and joins in book metadata.
+    """
     db = get_supabase()
 
     user_check = db.table("users").select("id").eq("id", user_id).limit(1).execute()
     if not user_check.data:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Join wishlist with books table to get title, author, cover_url
     rows = (
         db.table("wishlist")
         .select("book_id, match_score, rank, need_ids_matched, books(title, author, cover_url)")
