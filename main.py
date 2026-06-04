@@ -173,6 +173,7 @@ class ReadEventRequest(BaseModel):
     signal_type: str              # e.g. "star_5", "abandoned", "re_read"
     pct_read: float = 1.0         # 0.0–1.0
     emotional_state: int          # 1 (crisis) – 5 (joyful)
+    post_emotional_state: Optional[int] = None  # how the reader felt after finishing (1–5)
     occurred_at: Optional[datetime] = None  # if omitted, defaults to now
     review_text: Optional[str] = None
 
@@ -236,7 +237,7 @@ def _fetch_user_read_events(db: Client, user_id: str) -> list[ReadEvent]:
     """
     rows = (
         db.table("reads")
-        .select("book_id, signal_type, pct_read, emotional_state, occurred_at")
+        .select("book_id, signal_type, pct_read, emotional_state, post_emotional_state, occurred_at")
         .eq("user_id", user_id)
         .order("occurred_at", desc=False)
         .execute()
@@ -277,12 +278,14 @@ def _fetch_user_read_events(db: Client, user_id: str) -> list[ReadEvent]:
         # Ensure timezone-aware so scoring engine comparisons work correctly
         if occurred.tzinfo is None:
             occurred = occurred.replace(tzinfo=timezone.utc)
+        post_state = r.get("post_emotional_state")
         events.append(
             ReadEvent(
                 book_id=r["book_id"],
                 signal_type=r["signal_type"],
                 pct_read=float(r["pct_read"]),
                 emotional_state=int(r["emotional_state"]),
+                post_emotional_state=int(post_state) if post_state is not None else None,
                 occurred_at=occurred,
                 book_need_weights=book_weights.get(r["book_id"], {}),
             )
@@ -547,6 +550,8 @@ async def log_read(user_id: str, body: ReadEventRequest):
         "emotional_state": body.emotional_state,
         "occurred_at": occurred_at.isoformat(),
     }
+    if body.post_emotional_state is not None:
+        payload["post_emotional_state"] = body.post_emotional_state
     if body.review_text:
         payload["review_text"] = body.review_text
 
@@ -590,7 +595,7 @@ async def get_recommendations(user_id: str, limit: int = 10):
     # Run Stages 1–3: compute and modulate the reader's need profile
     now = datetime.now(timezone.utc)
     affinities = compute_all_affinities(events, now)
-    reader_vector = modulate_for_state(affinities, state, now)
+    reader_vector = modulate_for_state(affinities, state, now, events)
 
     # Don't recommend books the user has already read
     read_book_ids = list({e.book_id for e in events})

@@ -48,8 +48,9 @@ interface Props {
 export function LogReadModal({ bookId, bookTitle, userId, onClose, onSaved }: Props) {
   // Default values make it easy to save quickly — most users finished and loved the book
   const [signal, setSignal] = useState('star_5')
-  const [pctRead, setPctRead] = useState(100)   // 0–100 slider, converted to 0–1 on submit
-  const [state, setState] = useState(3)          // neutral default
+  const [pctRead, setPctRead] = useState(100)        // 0–100 slider, converted to 0–1 on submit
+  const [state, setState] = useState(3)              // neutral default
+  const [postState, setPostState] = useState<number | null>(null)  // optional — how they felt after
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -65,6 +66,7 @@ export function LogReadModal({ bookId, bookTitle, userId, onClose, onSaved }: Pr
         signal_type: signal,
         pct_read: pctRead / 100,  // convert percentage to 0–1 float
         emotional_state: state,
+        ...(postState !== null && { post_emotional_state: postState }),
       })
       onSaved()
     } catch {
@@ -112,12 +114,36 @@ export function LogReadModal({ bookId, bookTitle, userId, onClose, onSaved }: Pr
         <select
           value={state}
           onChange={e => setState(Number(e.target.value))}
-          className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm mb-6 focus:outline-none focus:ring-2 focus:ring-amber-400"
+          className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-amber-400"
         >
           {STATES.map(s => (
             <option key={s.value} value={s.value}>{s.label}</option>
           ))}
         </select>
+
+        {/* Post-read state chips — optional. The before/after delta lets the engine
+            learn whether this reader uses books as a mirror or an escape. Skippable
+            because readers may not remember or may not want to reflect on it. */}
+        <label className="block text-sm font-medium text-gray-700 mb-2">
+          How did you feel after finishing?{' '}
+          <span className="text-gray-400 font-normal">(optional)</span>
+        </label>
+        <div className="flex gap-2 mb-6">
+          {STATES.map(s => (
+            <button
+              key={s.value}
+              type="button"
+              onClick={() => setPostState(postState === s.value ? null : s.value)}
+              className={`flex-1 py-1.5 rounded-lg text-xs font-medium border transition ${
+                postState === s.value
+                  ? 'bg-amber-500 border-amber-500 text-white'
+                  : 'border-gray-200 text-gray-500 hover:border-amber-300 hover:text-gray-700'
+              }`}
+            >
+              {s.value}
+            </button>
+          ))}
+        </div>
 
         {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
 

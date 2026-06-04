@@ -4,15 +4,21 @@ Folio — Psychological Need Scoring Engine
 Four-stage pipeline:
   1. signal_contribution()   — raw weight from a single read event
   2. compute_affinity()      — aggregate into per-need affinity score
-  3. modulate_for_state()    — amplify needs matching current emotional state
+  3. modulate_for_state()    — amplify needs based on emotional state + learned reading style
   4. match_score()           — score a book against a reader's modulated profile
+
+Key change from v1:
+  modulate_for_state() now learns whether each reader uses books as a mirror
+  (deepening their current emotional state) or as an escape (shifting it).
+  It does this by comparing pre- and post-reading emotional states across past reads.
+  Until a reader has ≥3 before/after pairs in their current emotional zone, the engine
+  falls back to population-level mirror boosts (the original behaviour).
 """
 
 from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import Enum
 from typing import Optional
 
 
@@ -24,19 +30,19 @@ from typing import Optional
 # strongly it serves each need (0–1), and each reader builds an affinity
 # profile across these same needs based on their reading history.
 NEEDS = [
-    "being_chosen",         # Unconditional love / being chosen by someone
-    "surviving",            # Extreme resilience; making it through catastrophe
-    "procedural_resolution",# The satisfaction of a mystery or system unravelling
-    "moral_complexity",     # Sitting with ethical ambiguity; no easy answers
-    "power_agency",         # Claiming autonomy in a system that denies it
-    "wound_visible",        # Trauma named, witnessed, and validated
-    "making_sense_history", # Understanding how the world got to where it is
-    "self_remade",          # Transformation; second chances; reinvention
-    "inside_power",         # Access to elite rooms, politics, strategy
-    "identity_witnessed",   # Being truly seen in one's full specific identity
-    "world_larger",         # Wonder, discovery, the sublime
-    "creative_kinship",     # The bond between artists, makers, obsessives
-    "anxiety_named",        # Contemporary dread articulated and companioned
+    "being_chosen",          # Unconditional love / being chosen by someone
+    "surviving",             # Extreme resilience; making it through catastrophe
+    "procedural_resolution", # The satisfaction of a mystery or system unravelling
+    "moral_complexity",      # Sitting with ethical ambiguity; no easy answers
+    "power_agency",          # Claiming autonomy in a system that denies it
+    "wound_visible",         # Trauma named, witnessed, and validated
+    "making_sense_history",  # Understanding how the world got to where it is
+    "self_remade",           # Transformation; second chances; reinvention
+    "inside_power",          # Access to elite rooms, politics, strategy
+    "identity_witnessed",    # Being truly seen in one's full specific identity
+    "world_larger",          # Wonder, discovery, the sublime
+    "creative_kinship",      # The bond between artists, makers, obsessives
+    "anxiety_named",         # Contemporary dread articulated and companioned
 ]
 
 # How fast old reads fade in influence. Half-life ≈ 139 days, meaning a read
@@ -53,16 +59,37 @@ COLD_BOOK_THRESHOLD = 50  # number of ratings at which we trust the score fully
 # just finished (discourages recommending the same kind of book back-to-back).
 NOVELTY_DISCOUNT = 0.15
 
-# Multipliers applied to needs based on the reader's current emotional state.
-# State 1 = in crisis → amplify wound_visible, anxiety_named, surviving.
-# State 5 = thriving → amplify being_chosen, identity_witnessed, creative_kinship.
-STATE_BOOSTS: dict[int, dict[str, float]] = {
+# ---------------------------------------------------------------------------
+# Mirror boosts — for readers who use books to validate/deepen current state.
+# Applied when: (a) the reader is a confirmed mirror reader, or
+#               (b) we don't yet have enough before/after data to decide.
+# "Sad reader → wound_visible book" is the population-level default.
+# ---------------------------------------------------------------------------
+MIRROR_BOOSTS: dict[int, dict[str, float]] = {
     1: {"wound_visible": 2.0, "anxiety_named": 1.4, "surviving": 1.4},
     2: {"wound_visible": 1.4, "being_chosen": 1.4},
     3: {"making_sense_history": 1.4, "moral_complexity": 1.4, "creative_kinship": 1.4},
     4: {"world_larger": 1.4, "power_agency": 1.4, "inside_power": 1.4, "self_remade": 1.4},
     5: {"being_chosen": 1.4, "identity_witnessed": 1.4, "creative_kinship": 1.4},
 }
+
+# ---------------------------------------------------------------------------
+# Escape boosts — for readers who use books to shift their emotional state.
+# Applied when before/after data shows this reader's mood consistently moves
+# in a positive direction after reading (post_state > pre_state on average).
+# "Sad reader → self_remade book" is the escape-reader default.
+# ---------------------------------------------------------------------------
+ESCAPE_BOOSTS: dict[int, dict[str, float]] = {
+    1: {"self_remade": 1.8, "world_larger": 1.6, "being_chosen": 1.4},
+    2: {"self_remade": 1.6, "world_larger": 1.4, "being_chosen": 1.3},
+    3: {"world_larger": 1.4, "power_agency": 1.4, "procedural_resolution": 1.3},
+    4: {"moral_complexity": 1.4, "procedural_resolution": 1.4, "inside_power": 1.3},
+    5: {"procedural_resolution": 1.4, "moral_complexity": 1.3, "creative_kinship": 1.2},
+}
+
+# Alias kept for backward compatibility — used in emotional_alignment() where
+# we want the static population-level behaviour (not personalised).
+STATE_BOOSTS = MIRROR_BOOSTS
 
 # How much each reader action (signal) means. Positive = liked it,
 # negative = didn't. Re-reading is the strongest positive signal.
@@ -92,9 +119,11 @@ class ReadEvent:
     book_id: str
     signal_type: str            # key in SIGNAL_WEIGHTS (e.g. "star_5", "abandoned")
     pct_read: float             # 0.0–1.0, how much of the book was read
-    emotional_state: int        # 1 (crisis) – 5 (joyful) when the book was read
+    emotional_state: int        # 1–5: how the reader felt BEFORE reading
     occurred_at: datetime
     book_need_weights: dict[str, float]   # need → 0–1 weight pulled from book_need_tags
+    post_emotional_state: Optional[int] = None  # 1–5: how the reader felt AFTER reading
+                                                 # None if not captured (optional field)
 
 
 # Stores the computed affinity score for one reader × one need.
@@ -152,9 +181,10 @@ def finish_multiplier(pct_read: float) -> float:
 
 
 def emotional_alignment(emotional_state: int, need: str) -> float:
-    """Amplifies a signal when the reader's emotional state aligns with the need.
-    Example: someone in crisis (state 1) reading a 'wound_visible' book is a
-    much stronger signal for that need than someone happy reading the same book.
+    """Amplifies a signal when the reader's pre-reading emotional state aligns with the need.
+    Uses the static MIRROR_BOOSTS (population-level) — this is intentional.
+    signal_contribution() is about measuring what a book contributed to a need,
+    not about personalising recommendations. Personalisation happens in modulate_for_state().
     Returns a multiplier in the range [0.7, 1.3]."""
     boosts = STATE_BOOSTS.get(emotional_state, {})
     return boosts.get(need, 1.0) * 0.3 + 0.7   # scale boost into [0.7, 1.3]
@@ -167,7 +197,7 @@ def signal_contribution(event: ReadEvent, need: str) -> float:
       - signal_weight:       how positive/negative the rating is (SIGNAL_WEIGHTS)
       - book_need_weight:    how strongly this book tags this need (0–1)
       - finish_multiplier:   credibility based on how much was read
-      - emotional_alignment: amplify if mood matched the need at time of reading
+      - emotional_alignment: amplify if pre-reading mood matched the need
     """
     sig_w   = SIGNAL_WEIGHTS.get(event.signal_type, 0.0)
     need_w  = event.book_need_weights.get(need, 0.0)
@@ -272,45 +302,118 @@ def affinity_score(na: NeedAffinity) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Stage 3 — State modulation
+# Personal reading style — learned from before/after emotional data
+# ---------------------------------------------------------------------------
+
+def _state_zone(state: int) -> str:
+    """Bucket 1–5 emotional states into three zones.
+    Used to group before/after pairs for style learning — we want to know
+    how a reader's mood shifts when they're in a low, neutral, or high state,
+    not for every specific value on the scale."""
+    if state <= 2:
+        return 'low'
+    if state == 3:
+        return 'neutral'
+    return 'high'
+
+
+def compute_personal_style(
+    events: list[ReadEvent],
+    current_state: int,
+    min_events: int = 3,
+) -> Optional[float]:
+    """Compute a personal mirror/escape coefficient from the reader's before/after history.
+
+    Returns a float from -1.0 (confirmed mirror reader) to +1.0 (confirmed escape reader).
+    Returns None if there are fewer than min_events with both pre- and post-state captured
+    in the reader's current emotional zone — caller falls back to population-level boosts.
+
+    How it works:
+      - Find all past reads where emotional_state is in the same zone as current_state
+        AND post_emotional_state was captured.
+      - Compute delta = post_emotional_state - emotional_state for each.
+        Positive delta: the book shifted the reader's mood upward (escape pattern).
+        Negative delta: the book deepened it (mirror pattern).
+      - Average the deltas. Normalize to [-1, 1] by dividing by 2
+        (so an average shift of ±2 points maps to a coefficient of ±1).
+    """
+    zone = _state_zone(current_state)
+    relevant = [
+        e for e in events
+        if e.post_emotional_state is not None
+        and _state_zone(e.emotional_state) == zone
+    ]
+    if len(relevant) < min_events:
+        return None
+
+    deltas = [e.post_emotional_state - e.emotional_state for e in relevant]
+    avg_delta = sum(deltas) / len(deltas)
+    return max(-1.0, min(1.0, avg_delta / 2.0))
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 — State modulation (now personalised)
 # ---------------------------------------------------------------------------
 
 def modulate_for_state(
     affinities: dict[str, NeedAffinity],
     state: ReadingState,
     now: Optional[datetime] = None,
+    events: Optional[list[ReadEvent]] = None,
 ) -> dict[str, float]:
-    """Stage 3: boost needs that match the reader's current emotional state.
+    """Stage 3: boost needs that match the reader's emotional state and reading style.
 
-    Two boost sources:
-      - active_need_ids: needs the reader explicitly said they want (2× boost)
-      - STATE_BOOSTS:    needs that naturally align with the emotional state (up to 2× boost)
+    What changed from v1:
+      Previously this always applied MIRROR_BOOSTS (population assumption: sad reader
+      wants wound-visible books). Now it learns whether this specific reader uses books
+      as a mirror or as an escape, using their own before/after emotional data.
 
-    If the state is stale (captured >48h ago), no modulation is applied —
-    we fall back to the raw affinity profile.
+    Three-way decision:
+      1. No before/after data yet (style=None) → use MIRROR_BOOSTS (same as before)
+      2. Confirmed mirror reader (style < 0)   → amplify MIRROR_BOOSTS slightly
+      3. Escape reader (style ≥ 0)             → blend toward ESCAPE_BOOSTS
 
-    The result is normalised so all values sum to 1.0, making it a proper
-    probability-like vector that can be dot-producted against book need weights.
+    Blending for escape readers:
+      effective_boost[need] = mirror[need] + style × (escape[need] - mirror[need])
+      When style=0 this equals mirror[need] (no change from v1 at the threshold).
+      When style=1 this equals escape[need] (full escape pattern).
+
+    If state is stale (captured >48h ago), no modulation is applied at all.
+    The result is normalised to sum to 1.0 before being dot-producted with book weights.
     """
     now = now or datetime.now(timezone.utc)
 
-    # Don't apply mood boosts if the emotional state is from yesterday or earlier
     if state.is_stale(now):
-        boosts = {}
+        boosts: dict[str, float] = {}
     else:
-        boosts = STATE_BOOSTS.get(state.emotional_state, {})
+        mirror = MIRROR_BOOSTS.get(state.emotional_state, {})
+        style = compute_personal_style(events or [], state.emotional_state)
+
+        if style is None:
+            # Not enough before/after data — use population-level mirror boosts
+            boosts = mirror
+        elif style < 0:
+            # Confirmed mirror reader: amplify MIRROR_BOOSTS (up to 1.3× for style=-1)
+            amp = 1 + abs(style) * 0.3
+            boosts = {need: v * amp for need, v in mirror.items()}
+        else:
+            # Escape reader: linearly blend MIRROR_BOOSTS → ESCAPE_BOOSTS by style
+            escape = ESCAPE_BOOSTS.get(state.emotional_state, {})
+            all_needs = set(mirror) | set(escape)
+            boosts = {
+                need: mirror.get(need, 1.0) + style * (escape.get(need, 1.0) - mirror.get(need, 1.0))
+                for need in all_needs
+            }
 
     modulated: dict[str, float] = {}
     for need in NEEDS:
         base = affinity_score(affinities.get(need, NeedAffinity(need=need)))
-
         if need in state.active_need_ids:
             boost = 2.0           # reader explicitly requested this need
         elif need in boosts:
-            boost = boosts[need]  # need aligns with the reader's current mood
+            boost = boosts[need]  # learned or default state boost
         else:
             boost = 1.0           # no boost
-
         modulated[need] = base * boost
 
     # Normalise: divide every value by the total so they sum to 1.0
@@ -396,7 +499,7 @@ def build_why_prompt(
     not an algorithm. Lead with the psychological need, not the genre or plot.
     Cache the result — only regenerate when top_needs changes for this reader × book pair.
     """
-    needs_str = " and ".join(f'"{n.replace("_", " ")}"' for n in top_needs)
+    needs_str = " and ".join(f'"{ n.replace("_", " ")}"' for n in top_needs)
     return f"""You are explaining why a specific book matches a reader's deep psychological needs.
 
 Reader persona: {persona_label}
@@ -428,11 +531,14 @@ def full_pipeline(
     Takes the reader's full history + current state + a list of unread books,
     and returns them ranked by how well they match right now.
     Result: list of (book, match_score, top_needs) sorted descending by score.
+
+    events is passed to modulate_for_state so it can compute the personal
+    reading style coefficient from before/after emotional data.
     """
     now = now or datetime.now(timezone.utc)
 
-    affinities      = compute_all_affinities(events, now)         # Stages 1 + 2
-    reader_vector   = modulate_for_state(affinities, state, now)  # Stage 3
-    ranked          = rank_books(reader_vector, candidate_books)   # Stage 4
+    affinities    = compute_all_affinities(events, now)                    # Stages 1 + 2
+    reader_vector = modulate_for_state(affinities, state, now, events)    # Stage 3
+    ranked        = rank_books(reader_vector, candidate_books)             # Stage 4
 
     return ranked

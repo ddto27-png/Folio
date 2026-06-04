@@ -76,7 +76,7 @@ export async function getWishlist(userId: string): Promise<WishlistItem[]> {
 // After logging, the Supabase trigger recomputes affinities automatically.
 export async function logRead(
   userId: string,
-  data: { book_id: string; signal_type: string; pct_read: number; emotional_state: number; occurred_at?: string }
+  data: { book_id: string; signal_type: string; pct_read: number; emotional_state: number; post_emotional_state?: number; occurred_at?: string }
 ) {
   const res = await fetch(`${API_URL}/users/${userId}/reads`, {
     method: 'POST',
