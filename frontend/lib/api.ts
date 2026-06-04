@@ -3,7 +3,20 @@
 // The base URL is set via the NEXT_PUBLIC_API_URL environment variable
 // so it can point to localhost in development and Railway in production.
 
+import { supabase } from '@/lib/supabase'
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
+
+// Returns auth + content-type headers for the current Supabase session.
+// User-specific endpoints require this so the backend can verify the request
+// via JWT and derive the user ID — it never trusts the URL parameter.
+async function authHeaders(): Promise<Record<string, string>> {
+  const { data } = await supabase.auth.getSession()
+  const token = data.session?.access_token
+  return token
+    ? { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }
+    : { 'Content-Type': 'application/json' }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -53,34 +66,33 @@ export interface BookSearchResult {
 // API functions
 // ---------------------------------------------------------------------------
 
-// Fetch the top book recommendations for a user.
-// Triggers the full 4-stage scoring pipeline on the backend.
-export async function getRecommendations(userId: string): Promise<Recommendation[]> {
-  const res = await fetch(`${API_URL}/users/${userId}/recommendations`)
+// Fetch the top book recommendations for the current user.
+// The backend derives the user ID from the JWT — the _userId param is kept
+// only for call-site consistency and is not sent in the URL.
+export async function getRecommendations(_userId: string): Promise<Recommendation[]> {
+  const headers = await authHeaders()
+  const res = await fetch(`${API_URL}/recommendations`, { headers })
   if (!res.ok) throw new Error('Failed to fetch recommendations')
   return res.json()
 }
 
-// Fetch the user's saved wishlist, sorted by current match score.
-export async function getWishlist(userId: string): Promise<WishlistItem[]> {
-  const res = await fetch(`${API_URL}/users/${userId}/wishlist`)
+// Fetch the current user's saved wishlist, sorted by match score.
+export async function getWishlist(_userId: string): Promise<WishlistItem[]> {
+  const headers = await authHeaders()
+  const res = await fetch(`${API_URL}/wishlist`, { headers })
   if (!res.ok) throw new Error('Failed to fetch wishlist')
   return res.json()
 }
 
-// Log a read event for a user. Used in two places:
-//   - Onboarding: logs past reads to seed the user's psychological profile.
-//     Passes occurred_at backdated by however long ago they read it.
-//   - LogReadModal: logs a read from the recommendations page (no occurred_at,
-//     defaults to now on the backend).
-// After logging, the Supabase trigger recomputes affinities automatically.
+// Log a read event. The backend verifies the JWT and uses the user ID from it.
 export async function logRead(
-  userId: string,
+  _userId: string,
   data: { book_id: string; signal_type: string; pct_read: number; emotional_state: number; post_emotional_state?: number; occurred_at?: string }
 ) {
-  const res = await fetch(`${API_URL}/users/${userId}/reads`, {
+  const headers = await authHeaders()
+  const res = await fetch(`${API_URL}/reads`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(data),
   })
   if (!res.ok) throw new Error('Failed to log read')
@@ -90,7 +102,7 @@ export async function logRead(
 // Search for books by title. Returns up to 8 results combining:
 //   1. Books already in our Supabase catalog (shown first, in_catalog=true)
 //   2. Books from Open Library (fills remaining slots, in_catalog=false)
-// The backend deduplicates results by title.
+// No auth needed — book search is a public catalog operation.
 export async function searchBooks(q: string): Promise<BookSearchResult[]> {
   if (q.trim().length < 2) return []
   const res = await fetch(`${API_URL}/books/search?q=${encodeURIComponent(q)}`)
@@ -99,10 +111,8 @@ export async function searchBooks(q: string): Promise<BookSearchResult[]> {
 }
 
 // Add a book to our catalog if it doesn't already exist.
-// Called during onboarding when the user picks an Open Library result (in_catalog=false).
-// The backend fetches the book's description from Open Library, inserts the book,
-// then calls Claude Haiku to tag it with psychological need weights.
-// Returns the new book's ID so we can immediately log a read event against it.
+// The backend fetches the description from Open Library and tags it with Claude Haiku.
+// No auth needed — adding books to the shared catalog is a public operation.
 export async function findOrCreateBook(book: {
   title: string
   author: string | null

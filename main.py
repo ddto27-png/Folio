@@ -7,9 +7,9 @@ and expose an HTTP API the Next.js frontend consumes.
 Endpoints:
   GET  /books/search              — search catalog + Open Library live
   POST /books/find-or-create      — add a new book to the catalog and tag it with Claude
-  POST /users/{user_id}/reads     — log a read event (triggers affinity refresh via DB trigger)
-  GET  /users/{user_id}/recommendations — run full scoring pipeline and return top books
-  GET  /users/{user_id}/wishlist  — return user's saved books ranked by match score
+  POST /reads                     — log a read event (JWT-authenticated)
+  GET  /recommendations           — run full scoring pipeline and return top books (JWT-authenticated)
+  GET  /wishlist                  — return user's saved books ranked by match score (JWT-authenticated)
 """
 
 from __future__ import annotations
@@ -22,8 +22,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID
 
+import jwt as pyjwt
 import anthropic
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from supabase import create_client, Client
 
@@ -160,6 +162,33 @@ def _ol_get(url: str) -> dict:
 
 app = FastAPI(title="Folio", version="0.1.0")
 
+# ---------------------------------------------------------------------------
+# Auth — JWT validation
+# ---------------------------------------------------------------------------
+# Verifies the Supabase JWT sent by the frontend on every user-specific request.
+# Extracts the user's UUID from the token so endpoints never trust the URL.
+# SUPABASE_JWT_SECRET is in your Supabase dashboard → Settings → API → JWT Secret.
+
+_bearer = HTTPBearer(auto_error=False)
+
+def get_current_user_id(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
+) -> str:
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = pyjwt.decode(
+            credentials.credentials,
+            os.environ["SUPABASE_JWT_SECRET"],
+            algorithms=["HS256"],
+            audience="authenticated",
+        )
+        return payload["sub"]  # Supabase stores the user UUID here
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
 
 # ---------------------------------------------------------------------------
 # Request / Response models
@@ -168,7 +197,7 @@ app = FastAPI(title="Folio", version="0.1.0")
 # FastAPI validates incoming data against these automatically.
 
 class ReadEventRequest(BaseModel):
-    """Body for POST /users/{user_id}/reads — what a user read and how they felt."""
+    """Body for POST /reads — what a user read and how they felt."""
     book_id: str
     signal_type: str              # e.g. "star_5", "abandoned", "re_read"
     pct_read: float = 1.0         # 0.0–1.0
@@ -179,7 +208,7 @@ class ReadEventRequest(BaseModel):
 
 
 class RecommendationResponse(BaseModel):
-    """One book recommendation returned by GET /users/{user_id}/recommendations."""
+    """One book recommendation returned by GET /recommendations."""
     book_id: str
     title: str
     author: Optional[str]
@@ -190,7 +219,7 @@ class RecommendationResponse(BaseModel):
 
 
 class WishlistItemResponse(BaseModel):
-    """One item from the user's wishlist, returned by GET /users/{user_id}/wishlist."""
+    """One item from the user's wishlist, returned by GET /wishlist."""
     book_id: str
     title: str
     author: Optional[str]
@@ -516,30 +545,22 @@ async def find_or_create_book(body: FindOrCreateBookRequest):
 # Endpoint 1 — Log a read event
 # ---------------------------------------------------------------------------
 
-@app.post("/users/{user_id}/reads", status_code=201)
-async def log_read(user_id: str, body: ReadEventRequest):
+@app.post("/reads", status_code=201)
+async def log_read(body: ReadEventRequest, user_id: str = Depends(get_current_user_id)):
     """Persist a new read event to the 'reads' table.
 
+    User ID is derived from the verified JWT — never from the request body or URL.
     A Supabase database trigger (trg_new_read) fires after every insert and
     automatically recomputes the user's need_affinity scores and re-ranks
     their wishlist — so the recommendation engine updates immediately.
-
-    The occurred_at field lets onboarding backdate past reads (e.g. 'I read
-    this a year ago') so the scoring engine can weight older reads correctly.
     """
     db = get_supabase()
-
-    # Make sure the user exists in our public.users table
-    user_check = db.table("users").select("id").eq("id", user_id).limit(1).execute()
-    if not user_check.data:
-        raise HTTPException(status_code=404, detail="User not found")
 
     # Make sure the book is in our catalog
     book_check = db.table("books").select("id").eq("id", body.book_id).limit(1).execute()
     if not book_check.data:
         raise HTTPException(status_code=404, detail="Book not found")
 
-    # Use the provided timestamp, or default to right now
     occurred_at = body.occurred_at or datetime.now(timezone.utc)
 
     payload = {
@@ -566,9 +587,11 @@ async def log_read(user_id: str, body: ReadEventRequest):
 # Endpoint 2 — Recommendations
 # ---------------------------------------------------------------------------
 
-@app.get("/users/{user_id}/recommendations", response_model=list[RecommendationResponse])
-async def get_recommendations(user_id: str, limit: int = 10):
+@app.get("/recommendations", response_model=list[RecommendationResponse])
+async def get_recommendations(limit: int = 10, user_id: str = Depends(get_current_user_id)):
     """Run the full four-stage scoring pipeline and return the top `limit` books.
+
+    User ID is derived from the verified JWT.
 
     Steps:
       1. Pull all the user's read events (with need weights attached).
@@ -578,29 +601,18 @@ async def get_recommendations(user_id: str, limit: int = 10):
       5. Fetch up to 200 unread candidate books from the catalog.
       6. Score each candidate against the reader vector (Stage 4).
       7. For each of the top results, call Claude Haiku to generate why_text.
-
-    Why-text is generated per request (not cached) — it reflects the reader's
-    current psychological state, which changes over time.
     """
     db = get_supabase()
 
-    user_check = db.table("users").select("id").eq("id", user_id).limit(1).execute()
-    if not user_check.data:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Pull full reading history + current emotional state
     events = _fetch_user_read_events(db, user_id)
     state = _fetch_current_reading_state(db, user_id)
 
-    # Run Stages 1–3: compute and modulate the reader's need profile
     now = datetime.now(timezone.utc)
     affinities = compute_all_affinities(events, now)
     reader_vector = modulate_for_state(affinities, state, now, events)
 
-    # Don't recommend books the user has already read
     read_book_ids = list({e.book_id for e in events})
 
-    # Fetch candidate books (up to 200 to keep scoring fast)
     books_query = db.table("books").select("id, title, author, description, cover_url, ratings_count")
     if read_book_ids:
         books_query = books_query.not_.in_("id", read_book_ids)
@@ -611,7 +623,6 @@ async def get_recommendations(user_id: str, limit: int = 10):
 
     candidate_ids = [b["id"] for b in candidate_rows]
 
-    # Fetch need tags for all candidate books in one query
     tag_rows = (
         db.table("book_need_tags")
         .select("book_id, need_id, weight")
@@ -619,12 +630,10 @@ async def get_recommendations(user_id: str, limit: int = 10):
         .execute()
         .data
     )
-    # Build ID↔code lookups for converting between DB integers and scoring engine strings
     need_codes = db.table("needs").select("id, code").execute().data
     id_to_code = {n["id"]: n["code"] for n in need_codes}
     code_to_id = {n["code"]: n["id"] for n in need_codes}
 
-    # Assemble per-book need weight dicts
     book_weights: dict[str, dict[str, float]] = {}
     for tag in tag_rows:
         bw = book_weights.setdefault(tag["book_id"], {})
@@ -632,14 +641,13 @@ async def get_recommendations(user_id: str, limit: int = 10):
         if code:
             bw[code] = float(tag["weight"])
 
-    # Build BookProfile objects and run Stage 4 (match_score) for each
     book_meta = {b["id"]: b for b in candidate_rows}
     profiles = [
         BookProfile(
             book_id=b["id"],
             need_weights=book_weights.get(b["id"], {}),
             ratings_count=int(b.get("ratings_count") or 0),
-            recently_read_overlap=0.0,  # novelty overlap not yet implemented
+            recently_read_overlap=0.0,
         )
         for b in candidate_rows
     ]
@@ -651,15 +659,10 @@ async def get_recommendations(user_id: str, limit: int = 10):
     scored.sort(key=lambda x: x[1], reverse=True)
     top = scored[:limit]
 
-    # Generate why_text for each top book via Claude Haiku
     results: list[RecommendationResponse] = []
     for profile, score, top_needs in top:
         meta = book_meta[profile.book_id]
-        why = _generate_why_text(
-            top_needs,
-            meta["title"],
-            meta.get("description") or "",
-        )
+        why = _generate_why_text(top_needs, meta["title"], meta.get("description") or "")
         top_need_ids = [code_to_id[n] for n in top_needs if n in code_to_id]
         results.append(
             RecommendationResponse(
@@ -680,21 +683,15 @@ async def get_recommendations(user_id: str, limit: int = 10):
 # Endpoint 3 — Wishlist
 # ---------------------------------------------------------------------------
 
-@app.get("/users/{user_id}/wishlist", response_model=list[WishlistItemResponse])
-async def get_wishlist(user_id: str):
+@app.get("/wishlist", response_model=list[WishlistItemResponse])
+async def get_wishlist(user_id: str = Depends(get_current_user_id)):
     """Return the user's saved wishlist books, sorted by their current match rank.
 
-    The wishlist table is maintained by a Supabase function (rank_wishlist)
-    that runs via the trg_new_read trigger whenever the user logs a read.
-    This endpoint just reads the pre-computed results and joins in book metadata.
+    User ID is derived from the verified JWT.
+    The wishlist is maintained by the trg_new_read trigger and just read here.
     """
     db = get_supabase()
 
-    user_check = db.table("users").select("id").eq("id", user_id).limit(1).execute()
-    if not user_check.data:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Join wishlist with books table to get title, author, cover_url
     rows = (
         db.table("wishlist")
         .select("book_id, match_score, rank, need_ids_matched, books(title, author, cover_url)")
