@@ -1,147 +1,164 @@
-// page.tsx — the login / sign-up page (the app's entry point at "/").
-// Handles three auth flows:
-//   1. Email + password sign-in or sign-up (via Supabase Auth)
-//   2. Guest access (anonymous Supabase session — no email required)
-//   3. Auto-redirect if the user is already logged in
-//
-// After authentication, users are sent to:
-//   - /onboarding  if they have zero logged reads (new user)
-//   - /recommendations  if they have reads already (returning user)
-
 'use client'
 
-import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
-
-// Checks whether a signed-in user has any logged reads.
-// New users (0 reads) go to onboarding to seed their profile;
-// returning users go straight to their recommendations.
-async function getRedirectPath(userId: string): Promise<string> {
-  const { data } = await supabase
-    .from('reads')
-    .select('id', { count: 'exact', head: true })
-    .eq('user_id', userId)
-  return (data as unknown as { count: number } | null)?.count === 0 || data === null
-    ? '/onboarding'
-    : '/recommendations'
-}
+import { getRecommendations, type Recommendation } from '@/lib/api'
+import { BookCard } from '@/components/BookCard'
+import { InlineBookLogger } from '@/components/InlineBookLogger'
+import { SaveProfileModal } from '@/components/SaveProfileModal'
 
 export default function Home() {
-  const router = useRouter()
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [isSignUp, setIsSignUp] = useState(false)  // toggles between Sign In / Create Account mode
+  const [userId, setUserId] = useState<string | null>(null)
+  const [isAnonymous, setIsAnonymous] = useState(true)
+  const [books, setBooks] = useState<Recommendation[]>([])
   const [loading, setLoading] = useState(false)
-  const [guestLoading, setGuestLoading] = useState(false)
-  const [error, setError] = useState('')
+  const [booksLogged, setBooksLogged] = useState(0)
+  const [showSaveModal, setShowSaveModal] = useState(false)
 
-  // On mount, check if there's already an active session.
-  // If so, skip the login form and redirect immediately.
+  // On mount: restore an existing session, or silently create an anonymous one.
+  // The user never sees a login screen — they're just given a session automatically.
   useEffect(() => {
-    supabase.auth.getSession().then(async ({ data }) => {
+    async function initSession() {
+      const { data } = await supabase.auth.getSession()
       if (data.session) {
-        const path = await getRedirectPath(data.session.user.id)
-        router.push(path)
+        setUserId(data.session.user.id)
+        setIsAnonymous(data.session.user.is_anonymous ?? false)
+      } else {
+        const { data: anon } = await supabase.auth.signInAnonymously()
+        if (anon.user) {
+          setUserId(anon.user.id)
+          setIsAnonymous(true)
+        }
       }
-    })
-  }, [router])
+    }
+    initSession()
+  }, [])
 
-  // Handles both sign-in and sign-up from the same form.
-  // The isSignUp flag determines which Supabase auth method is called.
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
+  const fetchRecs = useCallback(async (uid: string) => {
     setLoading(true)
-    setError('')
-
-    const { data, error } = isSignUp
-      ? await supabase.auth.signUp({ email, password })
-      : await supabase.auth.signInWithPassword({ email, password })
-
-    if (error) {
-      setError(error.message)
+    try {
+      const data = await getRecommendations(uid)
+      setBooks(data)
+    } catch {
+      // Backend may not be running locally — empty state handles this gracefully
+    } finally {
       setLoading(false)
-    } else if (data.user) {
-      const path = await getRedirectPath(data.user.id)
-      router.push(path)
     }
-  }
+  }, [])
 
-  // Creates an anonymous Supabase session — no email or password needed.
-  // The user's reads are tied to their anonymous user ID and can be migrated
-  // to a real account later if they choose to sign up.
-  // Guests always go to onboarding (they never have prior reads).
-  async function handleGuest() {
-    setGuestLoading(true)
-    setError('')
-    const { data, error } = await supabase.auth.signInAnonymously()
-    if (error) {
-      setError(error.message)
-      setGuestLoading(false)
-    } else if (data.user) {
-      router.push('/onboarding')
-    }
+  useEffect(() => {
+    if (userId) fetchRecs(userId)
+  }, [userId, fetchRecs])
+
+  function handleBookLogged() {
+    setBooksLogged(n => n + 1)
+    if (userId) fetchRecs(userId)
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4">
-      <div className="w-full max-w-sm">
-        <h1 className="font-serif text-4xl font-bold text-gray-900 mb-2 text-center">Folio</h1>
-        <p className="text-center text-gray-500 text-sm mb-10">Books that meet you where you are.</p>
+    <div className="min-h-screen bg-stone-50">
 
-        {/* Email + password form — toggles between Sign In and Create Account */}
-        <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 flex flex-col gap-4">
-          <input
-            type="email"
-            placeholder="Email"
-            value={email}
-            onChange={e => setEmail(e.target.value)}
-            required
-            className="border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
-          />
-          <input
-            type="password"
-            placeholder="Password"
-            value={password}
-            onChange={e => setPassword(e.target.value)}
-            required
-            className="border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
-          />
-          {error && <p className="text-red-500 text-sm">{error}</p>}
-          <button
-            type="submit"
-            disabled={loading}
-            className="bg-amber-500 hover:bg-amber-600 text-white rounded-xl py-3 font-semibold text-sm transition disabled:opacity-50"
-          >
-            {loading ? 'Loading…' : isSignUp ? 'Create account' : 'Sign in'}
-          </button>
-          {/* Toggle link between Sign In and Create Account */}
-          <button
-            type="button"
-            onClick={() => setIsSignUp(!isSignUp)}
-            className="text-sm text-gray-400 hover:text-gray-600 transition text-center"
-          >
-            {isSignUp ? 'Already have an account? Sign in' : "Don't have an account? Sign up"}
-          </button>
-        </form>
-
-        {/* Divider between email auth and guest access */}
-        <div className="flex items-center gap-3 my-5">
-          <div className="flex-1 h-px bg-gray-200" />
-          <span className="text-xs text-gray-400">or</span>
-          <div className="flex-1 h-px bg-gray-200" />
+      {/* Header — minimal. "Save profile" lives here for anonymous users. */}
+      <header className="sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-gray-100">
+        <div className="max-w-2xl mx-auto px-4 h-14 flex items-center justify-between">
+          <span className="font-serif font-bold text-gray-900 text-lg tracking-tight">Folio</span>
+          <div className="flex items-center gap-4">
+            {!isAnonymous && (
+              <button
+                onClick={() => supabase.auth.signOut().then(() => window.location.reload())}
+                className="text-sm text-gray-400 hover:text-gray-600 transition"
+              >
+                Sign out
+              </button>
+            )}
+            {isAnonymous ? (
+              <button
+                onClick={() => setShowSaveModal(true)}
+                className="text-sm text-amber-600 font-medium hover:text-amber-700 transition"
+              >
+                Save profile
+              </button>
+            ) : (
+              <span className="text-sm text-gray-400">✓ Profile saved</span>
+            )}
+          </div>
         </div>
+      </header>
 
-        {/* Guest button — creates an anonymous session, no signup required */}
-        <button
-          onClick={handleGuest}
-          disabled={guestLoading}
-          className="w-full border border-gray-200 bg-white hover:bg-gray-50 text-gray-600 rounded-2xl py-3 text-sm font-medium transition disabled:opacity-50"
-        >
-          {guestLoading ? 'Loading…' : 'Continue as guest'}
-        </button>
-        <p className="text-center text-xs text-gray-400 mt-3">No account needed. Your reads are saved locally.</p>
-      </div>
+      <main className="max-w-2xl mx-auto px-4 py-8">
+
+        {/* Inline book logger — always visible at the top */}
+        {userId && (
+          <InlineBookLogger userId={userId} onLogged={handleBookLogged} />
+        )}
+
+        {/* Save profile nudge — appears after first book is logged */}
+        {isAnonymous && booksLogged >= 1 && (
+          <div className="flex items-center justify-between bg-amber-50 border border-amber-100 rounded-xl px-4 py-3 mt-4 text-sm">
+            <span className="text-amber-800">Want these recommendations on any device?</span>
+            <button
+              onClick={() => setShowSaveModal(true)}
+              className="text-amber-600 font-semibold hover:text-amber-700 transition ml-4 flex-shrink-0"
+            >
+              Save profile →
+            </button>
+          </div>
+        )}
+
+        {/* Recommendations section */}
+        <div className="mt-8">
+          <h2 className="font-serif text-2xl font-semibold text-gray-900 mb-1">For you</h2>
+          <p className="text-sm text-gray-400 mb-6">Matched to your reading needs right now.</p>
+
+          {/* Skeleton loading state */}
+          {loading && (
+            <div className="flex flex-col gap-4">
+              {[...Array(5)].map((_, i) => (
+                <div key={i} className="bg-white rounded-2xl h-36 animate-pulse border border-gray-100" />
+              ))}
+            </div>
+          )}
+
+          {/* Empty state — shown to new visitors before any books are logged */}
+          {!loading && books.length === 0 && (
+            <div className="text-center py-16">
+              <p className="text-3xl mb-4">📚</p>
+              <p className="font-serif text-gray-700 text-lg mb-2">Log a book above to get started</p>
+              <p className="text-gray-400 text-sm leading-relaxed">
+                Your recommendations will appear here and update<br />each time you log a book you’ve read.
+              </p>
+            </div>
+          )}
+
+          {/* Recommendation cards */}
+          <div className="flex flex-col gap-4">
+            {books.map(book => (
+              <BookCard
+                key={book.book_id}
+                bookId={book.book_id}
+                title={book.title}
+                author={book.author}
+                coverUrl={book.cover_url}
+                matchScore={book.match_score}
+                topNeedIds={book.top_need_ids}
+                whyText={book.why_text}
+                userId={userId ?? ''}
+                onReadLogged={() => userId && fetchRecs(userId)}
+              />
+            ))}
+          </div>
+        </div>
+      </main>
+
+      {showSaveModal && (
+        <SaveProfileModal
+          onClose={() => setShowSaveModal(false)}
+          onSaved={() => {
+            setIsAnonymous(false)
+            setShowSaveModal(false)
+          }}
+        />
+      )}
     </div>
   )
 }
