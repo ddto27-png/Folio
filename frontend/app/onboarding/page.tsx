@@ -1,3 +1,19 @@
+// onboarding/page.tsx — the onboarding flow for new users.
+//
+// Purpose: new users arrive here with zero read history, so the scoring engine
+// has nothing to work with. This page lets them log a handful of books they've
+// already read (with ratings, mood, and time ago) to seed their psychological
+// profile before they see their first recommendations.
+//
+// Flow:
+//   Step 1 "welcome"  — brief intro screen explaining what Folio does
+//   Step 2 "add"      — search for books, rate them, log them one by one
+//   (done)            — "See my recommendations →" navigates to /recommendations
+//
+// When the user picks a book that isn't in our catalog yet (in_catalog=false,
+// comes from Open Library), we call findOrCreateBook first to add it to the DB
+// and tag it with Claude Haiku before logging the read.
+
 'use client'
 
 import { useEffect, useState, useRef, useCallback } from 'react'
@@ -10,6 +26,8 @@ import { searchBooks, findOrCreateBook, logRead, type BookSearchResult } from '@
 // Constants
 // ---------------------------------------------------------------------------
 
+// The emotional state options shown as chips after a book is selected.
+// Values 1–5 match the emotional_state scale used throughout the scoring engine.
 const FEELINGS = [
   { label: 'In a dark place', value: 1 },
   { label: 'A bit low', value: 2 },
@@ -18,6 +36,9 @@ const FEELINGS = [
   { label: 'Really happy', value: 5 },
 ]
 
+// How long ago the user read the book. Converts to days so we can backdate
+// the occurred_at timestamp when logging the read, which feeds the scoring
+// engine's exponential decay (older reads count for less).
 const TIME_OPTIONS = [
   { label: 'This week', days: 4 },
   { label: 'This month', days: 20 },
@@ -27,10 +48,15 @@ const TIME_OPTIONS = [
   { label: 'More than 5 years ago', days: 2190 },
 ]
 
+// Maps 1–5 star rating to the signal_type strings used in SIGNAL_WEIGHTS
+// in scoring.py. These drive how strongly a book influences the user's
+// affinity profile for each psychological need.
 const SIGNAL_MAP: Record<number, string> = {
   1: 'star_1', 2: 'star_2', 3: 'star_3', 4: 'star_4', 5: 'star_5',
 }
 
+// Shape of a book after it's been successfully logged during onboarding.
+// Used to display the accumulating list of logged books at the top of the form.
 interface LoggedBook {
   bookId: string
   title: string
@@ -48,25 +74,27 @@ export default function OnboardingPage() {
   const router = useRouter()
   const [userId, setUserId] = useState<string | null>(null)
   const [step, setStep] = useState<'welcome' | 'add' | 'done'>('welcome')
-  const [loggedBooks, setLoggedBooks] = useState<LoggedBook[]>([])
+  const [loggedBooks, setLoggedBooks] = useState<LoggedBook[]>([])  // books logged so far this session
 
-  // Search state
+  // Search input state
   const [query, setQuery] = useState('')
-  const [results, setResults] = useState<BookSearchResult[]>([])
-  const [searching, setSearching] = useState(false)
+  const [results, setResults] = useState<BookSearchResult[]>([])  // search results from the API
+  const [searching, setSearching] = useState(false)               // shows "Searching…" indicator
   const [showDropdown, setShowDropdown] = useState(false)
-  const searchRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLDivElement>(null)  // used to detect clicks outside the dropdown
 
-  // Current book being configured
+  // The book the user has selected from the dropdown
   const [selected, setSelected] = useState<BookSearchResult | null>(null)
+  // The three pieces of metadata collected after a book is selected
   const [rating, setRating] = useState<number | null>(null)
   const [feeling, setFeeling] = useState<number | null>(null)
   const [timeOption, setTimeOption] = useState<typeof TIME_OPTIONS[0] | null>(null)
 
-  // Submission
+  // Form submission state
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
+  // On mount: verify the user is logged in. If not, send them to the login page.
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       if (!data.session) { router.push('/'); return }
@@ -74,7 +102,8 @@ export default function OnboardingPage() {
     })
   }, [router])
 
-  // Debounced search
+  // Debounced search: waits 300ms after the user stops typing before hitting the API.
+  // This avoids making a request for every keystroke.
   useEffect(() => {
     if (query.trim().length < 2) { setResults([]); setShowDropdown(false); return }
     const timer = setTimeout(async () => {
@@ -84,10 +113,10 @@ export default function OnboardingPage() {
       setShowDropdown(true)
       setSearching(false)
     }, 300)
-    return () => clearTimeout(timer)
+    return () => clearTimeout(timer)  // cancel the previous timer if the user keeps typing
   }, [query])
 
-  // Close dropdown on outside click
+  // Close the search dropdown when the user clicks anywhere outside the search box.
   useEffect(() => {
     function handler(e: MouseEvent) {
       if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
@@ -98,6 +127,8 @@ export default function OnboardingPage() {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
+  // Called when the user clicks a book in the dropdown.
+  // Fills the search input with the book title and resets the rating/feeling/time fields.
   function handleSelectBook(book: BookSearchResult) {
     setSelected(book)
     setQuery(book.title)
@@ -107,6 +138,7 @@ export default function OnboardingPage() {
     setTimeOption(null)
   }
 
+  // Clears all form fields so the user can add another book.
   function resetForm() {
     setSelected(null)
     setQuery('')
@@ -117,15 +149,24 @@ export default function OnboardingPage() {
     setError('')
   }
 
+  // The "Add this book" button is only active when all four fields are filled in.
   const canAddBook = selected && rating && feeling && timeOption
 
+  // Main submission handler — logs the book to the backend.
+  //
+  // If the book isn't in our catalog yet (selected from Open Library, id=null),
+  // we first call findOrCreateBook which fetches its description, inserts it,
+  // and tags it with Claude Haiku. Then we log the read with:
+  //   - a backdated occurred_at (timeOption.days ago) so scoring weights recency correctly
+  //   - the star rating mapped to a signal_type string
+  //   - the feeling value (1–5) as the emotional_state
   async function handleAddBook() {
     if (!canAddBook || !userId) return
     setSubmitting(true)
     setError('')
 
     try {
-      // Ensure book is in catalog
+      // If book isn't in our catalog, add it first
       let bookId = selected.id
       if (!bookId) {
         const created = await findOrCreateBook({
@@ -138,16 +179,17 @@ export default function OnboardingPage() {
         bookId = created.id
       }
 
-      // Log the read
+      // Backdate the read by however many days the user indicated
       const occurredAt = new Date(Date.now() - timeOption.days * 86400 * 1000).toISOString()
       await logRead(userId, {
         book_id: bookId,
-        signal_type: SIGNAL_MAP[rating],
-        pct_read: 1.0,
+        signal_type: SIGNAL_MAP[rating],   // e.g. "star_4"
+        pct_read: 1.0,                      // assume finished during onboarding
         emotional_state: feeling,
         occurred_at: occurredAt,
       })
 
+      // Add the book to the "already logged" list shown at the top of the page
       setLoggedBooks(prev => [...prev, {
         bookId,
         title: selected.title,
@@ -164,6 +206,7 @@ export default function OnboardingPage() {
     }
   }
 
+  // Navigates to recommendations once the user is done adding books.
   async function handleFinish() {
     router.push('/recommendations')
   }
@@ -172,6 +215,7 @@ export default function OnboardingPage() {
   // Render
   // ---------------------------------------------------------------------------
 
+  // Welcome screen shown first — brief pitch and a single CTA button.
   if (step === 'welcome') {
     return (
       <div className="min-h-screen flex items-center justify-center px-4">
@@ -198,7 +242,7 @@ export default function OnboardingPage() {
     <div className="min-h-screen px-4 py-10">
       <div className="max-w-lg mx-auto">
 
-        {/* Header */}
+        {/* Page header */}
         <div className="mb-8">
           <span className="font-serif font-bold text-gray-900 text-lg">Folio</span>
           <h2 className="font-serif text-2xl font-semibold text-gray-900 mt-4 mb-1">
@@ -209,7 +253,7 @@ export default function OnboardingPage() {
           </p>
         </div>
 
-        {/* Already logged */}
+        {/* List of books already logged this session — shown above the form */}
         {loggedBooks.length > 0 && (
           <div className="flex flex-col gap-2 mb-6">
             {loggedBooks.map((b, i) => (
@@ -221,6 +265,7 @@ export default function OnboardingPage() {
                 )}
                 <div className="flex-1 min-w-0">
                   <p className="font-serif font-semibold text-gray-800 text-sm truncate">{b.title}</p>
+                  {/* Star rating display using filled (★) and empty (☆) stars */}
                   <p className="text-xs text-gray-400">{'★'.repeat(b.rating)}{'☆'.repeat(5 - b.rating)}</p>
                 </div>
                 <span className="text-green-500 text-lg flex-shrink-0">✓</span>
@@ -229,12 +274,13 @@ export default function OnboardingPage() {
           </div>
         )}
 
-        {/* Book search */}
+        {/* Main book entry form */}
         <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 mb-4">
           <label className="block text-sm font-medium text-gray-700 mb-2">
             {loggedBooks.length === 0 ? 'Search for a book you’ve read' : 'Add another book'}
           </label>
 
+          {/* Search input with debounced dropdown */}
           <div ref={searchRef} className="relative mb-4">
             <input
               type="text"
@@ -248,6 +294,9 @@ export default function OnboardingPage() {
               <span className="absolute right-3 top-2.5 text-xs text-gray-400">Searching…</span>
             )}
 
+            {/* Dropdown: shows search results from catalog + Open Library.
+                Books with in_catalog=false show a "+ Add" badge indicating
+                they'll be created in the DB when selected. */}
             {showDropdown && results.length > 0 && (
               <div className="absolute z-10 w-full mt-1 bg-white border border-gray-100 rounded-xl shadow-lg overflow-hidden max-h-64 overflow-y-auto">
                 {results.map((book, i) => (
@@ -265,6 +314,7 @@ export default function OnboardingPage() {
                       <p className="text-sm font-medium text-gray-900 truncate">{book.title}</p>
                       {book.author && <p className="text-xs text-gray-400 truncate">{book.author}</p>}
                     </div>
+                    {/* Badge shown for Open Library books not yet in our catalog */}
                     {!book.in_catalog && (
                       <span className="ml-auto text-xs text-amber-500 flex-shrink-0">+ Add</span>
                     )}
@@ -274,9 +324,10 @@ export default function OnboardingPage() {
             )}
           </div>
 
-          {/* Rating */}
+          {/* Rating, feeling, and time fields — only shown after a book is selected */}
           {selected && (
             <>
+              {/* Star rating: clicking star N fills stars 1–N (cumulative highlight) */}
               <label className="block text-sm font-medium text-gray-700 mb-2">How did you rate it?</label>
               <div className="flex gap-2 mb-4">
                 {[1, 2, 3, 4, 5].map(n => (
@@ -290,7 +341,7 @@ export default function OnboardingPage() {
                 ))}
               </div>
 
-              {/* Feeling */}
+              {/* Emotional state when the book was read — feeds emotional_state in the read event */}
               <label className="block text-sm font-medium text-gray-700 mb-2">How were you feeling when you read it?</label>
               <div className="flex flex-wrap gap-2 mb-4">
                 {FEELINGS.map(f => (
@@ -304,7 +355,7 @@ export default function OnboardingPage() {
                 ))}
               </div>
 
-              {/* Time ago */}
+              {/* How long ago — used to backdate occurred_at for the decay calculation */}
               <label className="block text-sm font-medium text-gray-700 mb-2">How long ago did you read it?</label>
               <div className="flex flex-wrap gap-2">
                 {TIME_OPTIONS.map(t => (
@@ -323,8 +374,10 @@ export default function OnboardingPage() {
 
         {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
 
-        {/* Actions */}
+        {/* Action buttons */}
         <div className="flex flex-col gap-3">
+          {/* Primary CTA — disabled until all four fields are filled.
+              Shows "Adding to catalog…" if the book needs to be created first. */}
           <button
             onClick={handleAddBook}
             disabled={!canAddBook || submitting}
@@ -335,6 +388,7 @@ export default function OnboardingPage() {
               : loggedBooks.length === 0 ? 'Add this book' : 'Add another book'}
           </button>
 
+          {/* "See my recommendations" appears after the first book is logged */}
           {loggedBooks.length > 0 && (
             <button
               onClick={handleFinish}
@@ -345,6 +399,8 @@ export default function OnboardingPage() {
           )}
         </div>
 
+        {/* Subtle skip link — lets the user skip onboarding entirely.
+            They'll see recommendations with equal scores until they log some reads. */}
         {loggedBooks.length === 0 && (
           <button
             onClick={handleFinish}

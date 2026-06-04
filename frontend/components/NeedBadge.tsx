@@ -1,19 +1,33 @@
+// NeedBadge.tsx — a small coloured chip that labels one psychological need.
+//
+// Used in BookCard (recommendations) and WishlistPage to show which of the
+// 13 needs a book serves. Each need has a distinct colour so users can
+// recognise patterns across their recommendations at a glance.
+//
+// needId is the integer primary key from the Supabase 'needs' table,
+// which matches the NEED_CODE_TO_ID mapping in main.py.
+
+// Short display labels for each of the 13 psychological needs.
+// These are abbreviated versions of the full need descriptions in scoring.py.
 const NEED_LABELS: Record<number, string> = {
-  1: 'Being chosen',
-  2: 'Surviving',
-  3: 'Closure',
-  4: 'Moral grey',
-  5: 'Power',
-  6: 'Wound visible',
-  7: 'History',
-  8: 'Reinvention',
-  9: 'Inside power',
-  10: 'Being seen',
-  11: 'Wonder',
-  12: 'Creative bond',
-  13: 'Anxiety held',
+  1: 'Being chosen',   // being_chosen
+  2: 'Surviving',      // surviving
+  3: 'Closure',        // procedural_resolution
+  4: 'Moral grey',     // moral_complexity
+  5: 'Power',          // power_agency
+  6: 'Wound visible',  // wound_visible
+  7: 'History',        // making_sense_history
+  8: 'Reinvention',    // self_remade
+  9: 'Inside power',   // inside_power
+  10: 'Being seen',    // identity_witnessed
+  11: 'Wonder',        // world_larger
+  12: 'Creative bond', // creative_kinship
+  13: 'Anxiety held',  // anxiety_named
 }
 
+// Distinct Tailwind colour class pairs for each need — background + text.
+// Needs that are conceptually darker (grief, survival) use warmer/deeper colours;
+// lighter needs (wonder, love) use cooler/softer ones.
 const NEED_COLORS: Record<number, string> = {
   1:  'bg-rose-100 text-rose-700',
   2:  'bg-red-100 text-red-800',
@@ -30,6 +44,8 @@ const NEED_COLORS: Record<number, string> = {
   13: 'bg-slate-100 text-slate-700',
 }
 
+// Renders a single pill-shaped badge for a given need ID.
+// Falls back to a neutral grey style if the ID is unknown.
 export function NeedBadge({ needId }: { needId: number }) {
   return (
     <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${NEED_COLORS[needId] ?? 'bg-gray-100 text-gray-600'}`}>

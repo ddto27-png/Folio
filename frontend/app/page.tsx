@@ -1,9 +1,22 @@
+// page.tsx — the login / sign-up page (the app's entry point at "/").
+// Handles three auth flows:
+//   1. Email + password sign-in or sign-up (via Supabase Auth)
+//   2. Guest access (anonymous Supabase session — no email required)
+//   3. Auto-redirect if the user is already logged in
+//
+// After authentication, users are sent to:
+//   - /onboarding  if they have zero logged reads (new user)
+//   - /recommendations  if they have reads already (returning user)
+
 'use client'
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 
+// Checks whether a signed-in user has any logged reads.
+// New users (0 reads) go to onboarding to seed their profile;
+// returning users go straight to their recommendations.
 async function getRedirectPath(userId: string): Promise<string> {
   const { data } = await supabase
     .from('reads')
@@ -18,11 +31,13 @@ export default function Home() {
   const router = useRouter()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [isSignUp, setIsSignUp] = useState(false)
+  const [isSignUp, setIsSignUp] = useState(false)  // toggles between Sign In / Create Account mode
   const [loading, setLoading] = useState(false)
   const [guestLoading, setGuestLoading] = useState(false)
   const [error, setError] = useState('')
 
+  // On mount, check if there's already an active session.
+  // If so, skip the login form and redirect immediately.
   useEffect(() => {
     supabase.auth.getSession().then(async ({ data }) => {
       if (data.session) {
@@ -32,6 +47,8 @@ export default function Home() {
     })
   }, [router])
 
+  // Handles both sign-in and sign-up from the same form.
+  // The isSignUp flag determines which Supabase auth method is called.
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setLoading(true)
@@ -50,6 +67,10 @@ export default function Home() {
     }
   }
 
+  // Creates an anonymous Supabase session — no email or password needed.
+  // The user's reads are tied to their anonymous user ID and can be migrated
+  // to a real account later if they choose to sign up.
+  // Guests always go to onboarding (they never have prior reads).
   async function handleGuest() {
     setGuestLoading(true)
     setError('')
@@ -68,6 +89,7 @@ export default function Home() {
         <h1 className="font-serif text-4xl font-bold text-gray-900 mb-2 text-center">Folio</h1>
         <p className="text-center text-gray-500 text-sm mb-10">Books that meet you where you are.</p>
 
+        {/* Email + password form — toggles between Sign In and Create Account */}
         <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 flex flex-col gap-4">
           <input
             type="email"
@@ -93,6 +115,7 @@ export default function Home() {
           >
             {loading ? 'Loading…' : isSignUp ? 'Create account' : 'Sign in'}
           </button>
+          {/* Toggle link between Sign In and Create Account */}
           <button
             type="button"
             onClick={() => setIsSignUp(!isSignUp)}
@@ -102,12 +125,14 @@ export default function Home() {
           </button>
         </form>
 
+        {/* Divider between email auth and guest access */}
         <div className="flex items-center gap-3 my-5">
           <div className="flex-1 h-px bg-gray-200" />
           <span className="text-xs text-gray-400">or</span>
           <div className="flex-1 h-px bg-gray-200" />
         </div>
 
+        {/* Guest button — creates an anonymous session, no signup required */}
         <button
           onClick={handleGuest}
           disabled={guestLoading}
