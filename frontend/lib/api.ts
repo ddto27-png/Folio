@@ -99,6 +99,19 @@ export async function logRead(
   return res.json()
 }
 
+// Save the user's current emotional state and explicitly selected needs.
+// The backend marks the previous reading_state row as stale and inserts a fresh one.
+// Recommendations fetched after this call will immediately reflect the new state.
+export async function updateReadingState(data: { emotional_state: number; active_need_ids: number[] }): Promise<void> {
+  const headers = await authHeaders()
+  const res = await fetch(`${API_URL}/reading-state`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(data),
+  })
+  if (!res.ok) throw new Error('Failed to update reading state')
+}
+
 // Search for books by title. Returns up to 8 results combining:
 //   1. Books already in our Supabase catalog (shown first, in_catalog=true)
 //   2. Books from Open Library (fills remaining slots, in_catalog=false)

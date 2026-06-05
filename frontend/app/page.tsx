@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabase'
 import { getRecommendations, type Recommendation } from '@/lib/api'
 import { BookCard } from '@/components/BookCard'
 import { InlineBookLogger } from '@/components/InlineBookLogger'
+import { NeedFilterPanel } from '@/components/NeedFilterPanel'
 import { SaveProfileModal } from '@/components/SaveProfileModal'
 
 export default function Home() {
@@ -87,9 +88,16 @@ export default function Home() {
 
       <main className="max-w-2xl mx-auto px-4 py-8">
 
-        {/* Inline book logger — always visible at the top */}
+        {/* Need filter — lets users set mood and explicit interests */}
         {userId && (
-          <InlineBookLogger userId={userId} onLogged={handleBookLogged} />
+          <NeedFilterPanel onApplied={() => fetchRecs(userId)} />
+        )}
+
+        {/* Inline book logger — always visible below the filter */}
+        {userId && (
+          <div className="mt-4">
+            <InlineBookLogger userId={userId} onLogged={handleBookLogged} />
+          </div>
         )}
 
         {/* Save profile nudge — appears after first book is logged */}

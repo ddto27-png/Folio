@@ -26,7 +26,7 @@ import jwt as pyjwt
 import anthropic
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from supabase import create_client, Client
 
 from scoring import (
@@ -227,6 +227,12 @@ class WishlistItemResponse(BaseModel):
     match_score: Optional[float]
     rank: Optional[int]              # position in the wishlist by current match score
     need_ids_matched: Optional[list[int]]
+
+
+class ReadingStateRequest(BaseModel):
+    """Body for POST /reading-state — the user's current emotional state and explicit need interests."""
+    emotional_state: int = Field(ge=1, le=5)
+    active_need_ids: list[int] = []
 
 
 class BookSearchResult(BaseModel):
@@ -539,6 +545,34 @@ async def find_or_create_book(body: FindOrCreateBookRequest):
         pass  # Tagging failed — book exists, tags can be filled in later
 
     return book
+
+
+# ---------------------------------------------------------------------------
+# Endpoint 0 — Update reading state (emotional state + active needs)
+# ---------------------------------------------------------------------------
+
+@app.post("/reading-state", status_code=200)
+async def update_reading_state(body: ReadingStateRequest, user_id: str = Depends(get_current_user_id)):
+    """Save the user's current emotional state and explicitly chosen needs.
+
+    Marks any previous current row as not current, then inserts a fresh one.
+    The recommendations engine picks this up immediately on the next GET /recommendations call:
+    - emotional_state feeds the mirror/escape modulation in stage 3
+    - active_need_ids each receive a 2× boost in stage 3 regardless of reading history
+    """
+    db = get_supabase()
+    db.table("reading_state") \
+      .update({"is_current": False}) \
+      .eq("user_id", user_id) \
+      .eq("is_current", True) \
+      .execute()
+    db.table("reading_state").insert({
+        "user_id": user_id,
+        "emotional_state": body.emotional_state,
+        "active_need_ids": body.active_need_ids,
+        "is_current": True,
+    }).execute()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
