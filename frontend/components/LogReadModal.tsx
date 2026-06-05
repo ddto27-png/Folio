@@ -12,30 +12,7 @@
 
 import { useState } from 'react'
 import { logRead } from '@/lib/api'
-
-// Signal options presented in the dropdown — these values match the keys in
-// SIGNAL_WEIGHTS in scoring.py. The score they carry ranges from +1.0 (loved it)
-// to -0.8 (disliked it), with re_read as a special strong-positive signal.
-const SIGNALS = [
-  { value: 'star_5', label: '★★★★★  Loved it' },
-  { value: 'star_4', label: '★★★★  Really liked it' },
-  { value: 'star_3', label: '★★★  It was okay' },
-  { value: 'star_2', label: '★★  Didn\'t like it' },
-  { value: 'star_1', label: '★  Disliked it' },
-  { value: 'abandoned', label: '✕  Abandoned' },
-  { value: 're_read', label: '↩  Re-read' },
-]
-
-// Emotional state options — the 1–5 scale used throughout the scoring engine.
-// State 1 (crisis) boosts needs like wound_visible and surviving;
-// State 5 (thriving) boosts being_chosen and creative_kinship.
-const STATES = [
-  { value: 1, label: '1 — In crisis' },
-  { value: 2, label: '2 — Struggling' },
-  { value: 3, label: '3 — Neutral' },
-  { value: 4, label: '4 — Doing well' },
-  { value: 5, label: '5 — Thriving' },
-]
+import { EMOTIONAL_EMOTIONAL_STATES, SIGNALS } from '@/constants/emotional-states'
 
 interface Props {
   bookId: string
@@ -116,7 +93,7 @@ export function LogReadModal({ bookId, bookTitle, userId, onClose, onSaved }: Pr
           onChange={e => setState(Number(e.target.value))}
           className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-amber-400"
         >
-          {STATES.map(s => (
+          {EMOTIONAL_STATES.map(s => (
             <option key={s.value} value={s.value}>{s.label}</option>
           ))}
         </select>
@@ -129,7 +106,7 @@ export function LogReadModal({ bookId, bookTitle, userId, onClose, onSaved }: Pr
           <span className="text-gray-400 font-normal">(optional)</span>
         </label>
         <div className="flex gap-2 mb-6">
-          {STATES.map(s => (
+          {EMOTIONAL_STATES.map(s => (
             <button
               key={s.value}
               type="button"

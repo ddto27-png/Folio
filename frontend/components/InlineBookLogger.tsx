@@ -3,16 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import Image from 'next/image'
 import { searchBooks, findOrCreateBook, logRead, type BookSearchResult } from '@/lib/api'
-
-// How the user was feeling when they read the book — feeds emotional_state
-// in the read event, which the scoring engine uses to weight the signal.
-const FEELINGS = [
-  { label: 'In a dark place', value: 1 },
-  { label: 'A bit low',       value: 2 },
-  { label: 'Just okay',       value: 3 },
-  { label: 'Pretty good',     value: 4 },
-  { label: 'Really happy',    value: 5 },
-]
+import { EMOTIONAL_STATES } from '@/constants/emotional-states'
 
 interface Props {
   userId: string
@@ -189,17 +180,17 @@ export function InlineBookLogger({ userId, onLogged }: Props) {
 
           <p className="text-xs font-medium text-gray-500 mb-2">How were you feeling when you read it?</p>
           <div className="flex flex-wrap gap-2 mb-4">
-            {FEELINGS.map(f => (
+            {EMOTIONAL_STATES.map(s => (
               <button
-                key={f.value}
-                onClick={() => setFeeling(f.value)}
+                key={s.value}
+                onClick={() => setFeeling(s.value)}
                 className={`px-3 py-1.5 rounded-full text-xs font-medium transition ${
-                  feeling === f.value
+                  feeling === s.value
                     ? 'bg-amber-500 text-white'
                     : 'bg-gray-100 text-gray-600 hover:bg-amber-100'
                 }`}
               >
-                {f.label}
+                {s.chipLabel}
               </button>
             ))}
           </div>
