@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { getRecommendations, type Recommendation } from '@/lib/api'
 import { BookCard } from '@/components/BookCard'
@@ -9,6 +10,7 @@ import { NeedFilterPanel } from '@/components/NeedFilterPanel'
 import { SaveProfileModal } from '@/components/SaveProfileModal'
 
 export default function Home() {
+  const router = useRouter()
   const [userId, setUserId] = useState<string | null>(null)
   const [isAnonymous, setIsAnonymous] = useState(true)
   const [books, setBooks] = useState<Recommendation[]>([])
@@ -66,7 +68,7 @@ export default function Home() {
           <div className="flex items-center gap-4">
             {!isAnonymous && (
               <button
-                onClick={() => supabase.auth.signOut().then(() => window.location.reload())}
+                onClick={() => supabase.auth.signOut().then(() => router.push('/'))}
                 className="text-sm text-gray-400 hover:text-gray-600 transition"
               >
                 Sign out
