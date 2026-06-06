@@ -9,6 +9,8 @@ import { InlineBookLogger } from '@/components/InlineBookLogger'
 import { NeedFilterPanel } from '@/components/NeedFilterPanel'
 import { SaveProfileModal } from '@/components/SaveProfileModal'
 
+const SKELETON_COUNT = 5
+
 export default function Home() {
   const [userId, setUserId] = useState<string | null>(null)
   const [isAnonymous, setIsAnonymous] = useState(true)
@@ -95,7 +97,7 @@ export default function Home() {
 
           {loading && (
             <div className="flex flex-col gap-4">
-              {[...Array(5)].map((_, i) => (
+              {[...Array(SKELETON_COUNT)].map((_, i) => (
                 <div key={i} className="bg-white rounded-2xl h-36 animate-pulse border border-gray-100" />
               ))}
             </div>
