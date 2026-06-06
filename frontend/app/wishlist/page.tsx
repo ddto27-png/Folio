@@ -13,7 +13,7 @@ import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { getWishlist, type WishlistItem } from '@/lib/api'
 import { NeedBadge } from '@/components/NeedBadge'
-import { NavBar } from '@/components/NavBar'
+import { Header } from '@/components/Header'
 import Image from 'next/image'
 
 export default function WishlistPage() {
@@ -39,7 +39,7 @@ export default function WishlistPage() {
 
   return (
     <>
-      <NavBar />
+      <Header />
       <main className="max-w-2xl mx-auto px-4 py-8">
         <h2 className="font-serif text-2xl font-semibold text-gray-900 mb-1">Wishlist</h2>
         <p className="text-sm text-gray-400 mb-6">Ranked by how well they match you right now.</p>

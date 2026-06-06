@@ -1,16 +1,15 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { getRecommendations, type Recommendation } from '@/lib/api'
+import { Header } from '@/components/Header'
 import { BookCard } from '@/components/BookCard'
 import { InlineBookLogger } from '@/components/InlineBookLogger'
 import { NeedFilterPanel } from '@/components/NeedFilterPanel'
 import { SaveProfileModal } from '@/components/SaveProfileModal'
 
 export default function Home() {
-  const router = useRouter()
   const [userId, setUserId] = useState<string | null>(null)
   const [isAnonymous, setIsAnonymous] = useState(true)
   const [books, setBooks] = useState<Recommendation[]>([])
@@ -60,33 +59,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-stone-50">
-
-      {/* Header — minimal. "Save profile" lives here for anonymous users. */}
-      <header className="sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-gray-100">
-        <div className="max-w-2xl mx-auto px-4 h-14 flex items-center justify-between">
-          <span className="font-serif font-bold text-gray-900 text-lg tracking-tight">Folio</span>
-          <div className="flex items-center gap-4">
-            {!isAnonymous && (
-              <button
-                onClick={() => supabase.auth.signOut().then(() => router.push('/'))}
-                className="text-sm text-gray-400 hover:text-gray-600 transition"
-              >
-                Sign out
-              </button>
-            )}
-            {isAnonymous ? (
-              <button
-                onClick={() => setShowSaveModal(true)}
-                className="text-sm text-amber-600 font-medium hover:text-amber-700 transition"
-              >
-                Save profile
-              </button>
-            ) : (
-              <span className="text-sm text-gray-400">✓ Profile saved</span>
-            )}
-          </div>
-        </div>
-      </header>
+      <Header />
 
       <main className="max-w-2xl mx-auto px-4 py-8">
 
@@ -120,7 +93,6 @@ export default function Home() {
           <h2 className="font-serif text-2xl font-semibold text-gray-900 mb-1">For you</h2>
           <p className="text-sm text-gray-400 mb-6">Matched to your reading needs right now.</p>
 
-          {/* Skeleton loading state */}
           {loading && (
             <div className="flex flex-col gap-4">
               {[...Array(5)].map((_, i) => (
@@ -129,18 +101,16 @@ export default function Home() {
             </div>
           )}
 
-          {/* Empty state — shown to new visitors before any books are logged */}
           {!loading && books.length === 0 && (
             <div className="text-center py-16">
               <p className="text-3xl mb-4">📚</p>
               <p className="font-serif text-gray-700 text-lg mb-2">Log a book above to get started</p>
               <p className="text-gray-400 text-sm leading-relaxed">
-                Your recommendations will appear here and update<br />each time you log a book you’ve read.
+                Your recommendations will appear here and update<br />each time you log a book you've read.
               </p>
             </div>
           )}
 
-          {/* Recommendation cards */}
           <div className="flex flex-col gap-4">
             {books.map(book => (
               <BookCard
@@ -159,7 +129,6 @@ export default function Home() {
           </div>
         </div>
       </main>
-
       {showSaveModal && (
         <SaveProfileModal
           onClose={() => setShowSaveModal(false)}
