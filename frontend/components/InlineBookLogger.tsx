@@ -17,6 +17,7 @@ export function InlineBookLogger({ userId, onLogged }: Props) {
   const [showDropdown, setShowDropdown] = useState(false)
   const [selected, setSelected] = useState<BookSearchResult | null>(null)
   const [rating, setRating] = useState<number | null>(null)
+  const [pctRead, setPctRead] = useState<number | null>(null)
   const [feeling, setFeeling] = useState<number | null>(null)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -60,12 +61,13 @@ export function InlineBookLogger({ userId, onLogged }: Props) {
     setQuery('')
     setResults([])
     setRating(null)
+    setPctRead(null)
     setFeeling(null)
     setError('')
   }
 
   async function handleLog() {
-    if (!selected || !rating || !feeling) return
+    if (!selected || !rating || !pctRead || !feeling) return
     setSubmitting(true)
     setError('')
     try {
@@ -86,7 +88,7 @@ export function InlineBookLogger({ userId, onLogged }: Props) {
       await logRead(userId, {
         book_id: bookId,
         signal_type: `star_${rating}`,
-        pct_read: 1.0,
+        pct_read: pctRead,
         emotional_state: feeling,
       })
 
@@ -178,6 +180,27 @@ export function InlineBookLogger({ userId, onLogged }: Props) {
             ))}
           </div>
 
+          <p className="text-xs font-medium text-gray-500 mb-2">How much did you read?</p>
+          <div className="flex gap-2 mb-4">
+            {[
+              { label: 'Just started', value: 0.2 },
+              { label: 'Halfway through', value: 0.7 },
+              { label: 'Finished', value: 1.0 },
+            ].map(opt => (
+              <button
+                key={opt.value}
+                onClick={() => setPctRead(opt.value)}
+                className={`flex-1 py-1.5 rounded-xl text-xs font-medium transition ${
+                  pctRead === opt.value
+                    ? 'bg-amber-500 text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-amber-100'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
           <p className="text-xs font-medium text-gray-500 mb-2">How were you feeling when you read it?</p>
           <div className="flex flex-wrap gap-2 mb-4">
             {EMOTIONAL_STATES.map(s => (
@@ -199,7 +222,7 @@ export function InlineBookLogger({ userId, onLogged }: Props) {
 
           <button
             onClick={handleLog}
-            disabled={!rating || !feeling || submitting}
+            disabled={!rating || !pctRead || !feeling || submitting}
             className="w-full bg-amber-500 hover:bg-amber-600 text-white rounded-xl py-2.5 text-sm font-semibold transition disabled:opacity-40"
           >
             {submitting
