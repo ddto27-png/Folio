@@ -6,9 +6,6 @@ module.exports = {
       fontFamily: {
         serif: ['Georgia', 'Cambria', 'serif'],
       },
-      colors: {
-        cream: '#F8F5F0',
-      },
     },
   },
   plugins: [],
