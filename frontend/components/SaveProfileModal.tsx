@@ -19,7 +19,10 @@ export function SaveProfileModal({ onClose, onSaved }: Props) {
   const [error, setError] = useState('')
 
   async function handleSave() {
-    if (!email || !password) return
+    if (!email || !password) {
+      setError('Please enter both an email and a password.')
+      return
+    }
     setSaving(true)
     setError('')
     const { error } = await supabase.auth.updateUser({ email, password })
