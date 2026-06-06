@@ -35,8 +35,8 @@ export function NavBar() {
         <div className="flex items-center gap-6">
           {/* "For you" — highlighted amber when on the recommendations page */}
           <Link
-            href="/recommendations"
-            className={`text-sm font-medium transition ${pathname === '/recommendations' ? 'text-amber-600' : 'text-gray-500 hover:text-gray-800'}`}
+            href="/"
+            className={`text-sm font-medium transition ${pathname === '/' ? 'text-amber-600' : 'text-gray-500 hover:text-gray-800'}`}
           >
             For you
           </Link>
