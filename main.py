@@ -145,7 +145,10 @@ def _tag_book(client: anthropic.Anthropic, title: str, author: str, description:
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Claude returned invalid JSON: {e}\nRaw: {raw[:200]}")
 
 
 def _ol_get(url: str) -> dict:
@@ -541,8 +544,11 @@ async def find_or_create_book(body: FindOrCreateBookRequest):
             tag_rows.append(entry)
         if tag_rows:
             db.table("book_need_tags").insert(tag_rows).execute()
-    except Exception:
-        pass  # Tagging failed — book exists, tags can be filled in later
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Book saved but tagging failed — retry to tag it: {str(e)}",
+        )
 
     return book
 

@@ -14,6 +14,7 @@ const SKELETON_COUNT = 5
 export default function Home() {
   const [userId, setUserId] = useState<string | null>(null)
   const [isAnonymous, setIsAnonymous] = useState(true)
+  const [authError, setAuthError] = useState(false)
   const [books, setBooks] = useState<Recommendation[]>([])
   const [loading, setLoading] = useState(false)
   const [booksLogged, setBooksLogged] = useState(0)
@@ -28,8 +29,10 @@ export default function Home() {
         setUserId(data.session.user.id)
         setIsAnonymous(data.session.user.is_anonymous ?? false)
       } else {
-        const { data: anon } = await supabase.auth.signInAnonymously()
-        if (anon.user) {
+        const { data: anon, error } = await supabase.auth.signInAnonymously()
+        if (error || !anon.user) {
+          setAuthError(true)
+        } else {
           setUserId(anon.user.id)
           setIsAnonymous(true)
         }
@@ -64,6 +67,12 @@ export default function Home() {
       <Header />
 
       <main className="max-w-2xl mx-auto px-4 py-8">
+
+        {authError && (
+          <div className="bg-red-50 border border-red-100 rounded-xl px-4 py-3 mb-6 text-sm text-red-700">
+            Could not start a session — please check your connection and refresh the page.
+          </div>
+        )}
 
         {/* Need filter — lets users set mood and explicit interests */}
         {userId && (
