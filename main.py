@@ -15,12 +15,13 @@ Endpoints:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from uuid import UUID
+
 
 import jwt as pyjwt
 import anthropic
@@ -142,7 +143,10 @@ def _tag_book(client: anthropic.Anthropic, title: str, author: str, description:
     raw = msg.content[0].text.strip()
     # Strip ```json ... ``` fences if the model added them despite instructions
     if raw.startswith("```"):
-        raw = raw.split("```")[1]
+        parts = raw.split("```")
+        if len(parts) < 2:
+            raise ValueError(f"Claude returned malformed fenced block: {raw[:200]}")
+        raw = parts[1]
         if raw.startswith("json"):
             raw = raw[4:]
     try:
@@ -162,6 +166,8 @@ def _ol_get(url: str) -> dict:
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Folio", version="0.1.0")
 
@@ -457,8 +463,8 @@ async def search_books(q: str, limit: int = 8):
                 catalog_titles.add(title.lower())
                 if len(results) >= limit:
                     break
-        except Exception:
-            pass  # If Open Library is down, just return catalog results
+        except Exception as e:
+            logger.warning("Open Library search failed: %s", e)
 
     return results[:limit]
 
@@ -506,8 +512,8 @@ async def find_or_create_book(body: FindOrCreateBookRequest):
             work = _ol_get(f"https://openlibrary.org{body.ol_key}.json")
             raw = work.get("description")
             description = raw.get("value") if isinstance(raw, dict) else raw
-        except Exception:
-            pass  # description is optional; scoring still works without it
+        except Exception as e:
+            logger.warning("Failed to fetch Open Library description for %s: %s", body.ol_key, e)
 
     # Insert the book with whatever metadata we have
     row = {

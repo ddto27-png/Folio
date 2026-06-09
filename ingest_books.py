@@ -44,6 +44,8 @@ NEED_CODE_TO_ID: dict[str, int] = {
     "anxiety_named":         13,
 }
 
+NEED_ID_TO_CODE: dict[int, str] = {v: k for k, v in NEED_CODE_TO_ID.items()}
+
 NEED_DESCRIPTIONS: dict[str, str] = {
     "being_chosen":          "Being perfectly chosen / unconditional romantic or familial love",
     "surviving":             "Surviving the unsurvivable / extreme resilience under catastrophe",
@@ -284,7 +286,10 @@ def tag_book(client: anthropic.Anthropic, title: str, author: str, description: 
     raw = message.content[0].text.strip()
     # Strip markdown fences if the model adds them despite instructions
     if raw.startswith("```"):
-        raw = raw.split("```")[1]
+        parts = raw.split("```")
+        if len(parts) < 2:
+            raise ValueError(f"Claude returned malformed fenced block: {raw[:200]}")
+        raw = parts[1]
         if raw.startswith("json"):
             raw = raw[4:]
     return json.loads(raw)
@@ -362,7 +367,7 @@ def ingest_all(dry_run: bool = False) -> None:
         if tag_rows:
             db.table("book_need_tags").upsert(tag_rows, on_conflict="book_id,need_id").execute()
             top = sorted(tag_rows, key=lambda r: r["weight"], reverse=True)[:3]
-            top_str = ", ".join(f"{NEED_CODE_TO_ID[r['need_id']] if False else list(NEED_CODE_TO_ID.keys())[list(NEED_CODE_TO_ID.values()).index(r['need_id'])]}: {r['weight']}" for r in top)
+            top_str = ", ".join(f"{NEED_ID_TO_CODE.get(r['need_id'], r['need_id'])}: {r['weight']}" for r in top)
             print(f"  tagged {len(tag_rows)} needs  (top: {top_str})")
 
         # Polite rate limiting — Open Library asks for 1 req/sec
