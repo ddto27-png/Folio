@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import Image from 'next/image'
-import { searchBooks, findOrCreateBook, logRead, type BookSearchResult } from '@/lib/api'
+import { searchBooks, requestBook, logRead, type BookSearchResult } from '@/lib/api'
 import { EMOTIONAL_STATES } from '@/constants/emotional-states'
 
 interface Props {
@@ -22,6 +22,7 @@ export function InlineBookLogger({ userId, onLogged }: Props) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [justLogged, setJustLogged] = useState(false)
+  const [requested, setRequested] = useState(false)
   const searchRef = useRef<HTMLDivElement>(null)
 
   // Debounced search — waits 300ms after typing stops before hitting the API
@@ -66,27 +67,19 @@ export function InlineBookLogger({ userId, onLogged }: Props) {
     setError('')
   }
 
+  async function handleRequest(title: string, author: string | null) {
+    await requestBook(title, author)
+    setRequested(true)
+    setTimeout(() => { setRequested(false); reset() }, 3000)
+  }
+
   async function handleLog() {
     if (!selected || !rating || !pctRead || !feeling) return
     setSubmitting(true)
     setError('')
     try {
-      // If the book came from Open Library (not yet in our catalog), create it first.
-      // findOrCreateBook fetches the description and tags it with Claude Haiku.
-      let bookId = selected.id
-      if (!bookId) {
-        const created = await findOrCreateBook({
-          title: selected.title,
-          author: selected.author,
-          cover_url: selected.cover_url,
-          pub_year: selected.pub_year,
-          ol_key: selected.ol_key,
-        })
-        bookId = created.id
-      }
-
       await logRead(userId, {
-        book_id: bookId,
+        book_id: selected.id,
         signal_type: `star_${rating}`,
         pct_read: pctRead,
         emotional_state: feeling,
@@ -104,6 +97,14 @@ export function InlineBookLogger({ userId, onLogged }: Props) {
     } finally {
       setSubmitting(false)
     }
+  }
+
+  if (requested) {
+    return (
+      <div className="bg-amber-50 border border-amber-100 rounded-2xl px-5 py-4 text-center">
+        <p className="text-amber-700 font-medium text-sm">Requested! We&apos;ll add it within 24 hours.</p>
+      </div>
+    )
   }
 
   // Brief success state — shown for 1.5s after a book is logged
@@ -133,10 +134,10 @@ export function InlineBookLogger({ userId, onLogged }: Props) {
           <span className="absolute right-3 top-2.5 text-xs text-gray-400">Searching…</span>
         )}
 
-        {/* Results dropdown — catalog results first, Open Library results labelled "+ Add" */}
-        {showDropdown && results.length > 0 && (
+        {/* Results dropdown */}
+        {showDropdown && (
           <div className="absolute z-10 w-full mt-1 bg-white border border-gray-100 rounded-xl shadow-lg overflow-hidden max-h-64 overflow-y-auto">
-            {results.map((book, i) => (
+            {results.length > 0 ? results.map((book, i) => (
               <button
                 key={i}
                 onClick={() => handleSelectBook(book)}
@@ -151,11 +152,18 @@ export function InlineBookLogger({ userId, onLogged }: Props) {
                   <p className="text-sm font-medium text-gray-900 truncate">{book.title}</p>
                   {book.author && <p className="text-xs text-gray-400 truncate">{book.author}</p>}
                 </div>
-                {!book.in_catalog && (
-                  <span className="ml-auto text-xs text-amber-500 flex-shrink-0">+ Add</span>
-                )}
               </button>
-            ))}
+            )) : !searching && query.trim().length >= 2 && (
+              <div className="px-4 py-3">
+                <p className="text-sm text-gray-500 mb-2">Not in our catalog yet.</p>
+                <button
+                  onClick={() => handleRequest(query.trim(), null)}
+                  className="text-xs font-medium text-amber-600 hover:underline"
+                >
+                  Request &ldquo;{query.trim()}&rdquo; →
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -225,9 +233,7 @@ export function InlineBookLogger({ userId, onLogged }: Props) {
             disabled={!rating || !pctRead || !feeling || submitting}
             className="w-full bg-amber-500 hover:bg-amber-600 text-white rounded-xl py-2.5 text-sm font-semibold transition disabled:opacity-40"
           >
-            {submitting
-              ? (selected && !selected.in_catalog ? 'Adding to catalog…' : 'Logging…')
-              : 'Log this book'}
+            {submitting ? 'Logging…' : 'Log this book'}
           </button>
         </div>
       )}
