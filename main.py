@@ -6,7 +6,7 @@ and expose an HTTP API the Next.js frontend consumes.
 
 Endpoints:
   GET  /books/search              — search catalog + Open Library live
-  POST /books/find-or-create      — add a new book to the catalog and tag it with Claude
+  POST /books/request             — request a book be added to the catalog (nightly batch)
   POST /reads                     — log a read event (JWT-authenticated)
   GET  /recommendations           — run full scoring pipeline and return top books (JWT-authenticated)
   GET  /wishlist                  — return user's saved books ranked by match score (JWT-authenticated)
@@ -15,15 +15,13 @@ Endpoints:
 from __future__ import annotations
 
 import json
+import logging
 import os
-import urllib.parse
-import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from uuid import UUID
 
-import jwt as pyjwt
 import anthropic
+import jwt as pyjwt
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -71,97 +69,13 @@ def get_anthropic() -> anthropic.Anthropic:
     return _anthropic
 
 
-# ---------------------------------------------------------------------------
-# Book tagging helpers (used by the find-or-create endpoint)
-# ---------------------------------------------------------------------------
-
-# Maps the need code strings used in scoring.py to the integer IDs in the
-# Supabase 'needs' table. Used when inserting book_need_tags rows.
-NEED_CODE_TO_ID: dict[str, int] = {
-    "being_chosen": 1, "surviving": 2, "procedural_resolution": 3,
-    "moral_complexity": 4, "power_agency": 5, "wound_visible": 6,
-    "making_sense_history": 7, "self_remade": 8, "inside_power": 9,
-    "identity_witnessed": 10, "world_larger": 11, "creative_kinship": 12,
-    "anxiety_named": 13,
-}
-
-# Human-readable descriptions of each need, passed to Claude Haiku in the
-# tagging prompt so it understands what each code means.
-_NEED_DESCRIPTIONS = {
-    "being_chosen":          "Being perfectly chosen / unconditional romantic or familial love",
-    "surviving":             "Surviving the unsurvivable / extreme resilience under catastrophe",
-    "procedural_resolution": "Procedural resolution / the satisfying unravelling of a mystery or system",
-    "moral_complexity":      "Moral complexity held / sitting with ethical ambiguity without easy answers",
-    "power_agency":          "Access to power and agency / claiming autonomy in a system that denies it",
-    "wound_visible":         "The wound made visible / trauma named, witnessed, and validated",
-    "making_sense_history":  "Making sense of history / understanding how we got here",
-    "self_remade":           "The self can be remade / transformation and second chances",
-    "inside_power":          "Being inside power / access to elite rooms, politics, strategy",
-    "identity_witnessed":    "Identity witnessed / being truly seen in one's full, specific identity",
-    "world_larger":          "The world is larger / wonder, discovery, the sublime",
-    "creative_kinship":      "Creative kinship / the bond between artists, makers, obsessives",
-    "anxiety_named":         "Anxiety named and held / contemporary dread articulated and companioned",
-}
-
-# System prompt for Claude Haiku tagging. Instructs the model to return
-# only valid JSON with a 0–1 weight for each of the 13 needs.
-_TAGGING_SYSTEM = (
-    "You are a literary psychologist. Given a book's title, author, and description, "
-    "assign weights (0.0-1.0) reflecting how strongly it serves each of 13 psychological needs. "
-    "Most books serve 2-4 needs strongly (>=0.4); the rest should be 0.0-0.2. "
-    "For wound_visible also set has_perpetrator: true if the wound was caused by another person. "
-    "Respond with valid JSON only - no explanation, no markdown fences."
-)
-
-# Template filled in per book and sent to Claude Haiku as the user message.
-_TAGGING_TEMPLATE = """Book: "{title}" by {author}
-Description: {description}
-
-Score across these 13 needs (0.0-1.0 each):
-{needs_list}
-
-Return JSON: {{"being_chosen":0.0,"surviving":0.0,"procedural_resolution":0.0,"moral_complexity":0.0,"power_agency":0.0,"wound_visible":0.0,"making_sense_history":0.0,"self_remade":0.0,"inside_power":0.0,"identity_witnessed":0.0,"world_larger":0.0,"creative_kinship":0.0,"anxiety_named":0.0,"has_perpetrator":false}}"""
-
-
-def _tag_book(client: anthropic.Anthropic, title: str, author: str, description: str) -> dict:
-    """Calls Claude Haiku to assign psychological need weights to a book.
-    Returns a dict with one key per need (0–1 float) plus 'has_perpetrator' (bool).
-    Strips markdown fences in case the model wraps its JSON response in them."""
-    needs_list = "\n".join(f"  {k}: {v}" for k, v in _NEED_DESCRIPTIONS.items())
-    prompt = _TAGGING_TEMPLATE.format(
-        title=title, author=author,
-        description=description or "(infer from title and author)",
-        needs_list=needs_list,
-    )
-    msg = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=400,
-        system=_TAGGING_SYSTEM,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    raw = msg.content[0].text.strip()
-    # Strip ```json ... ``` fences if the model added them despite instructions
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Claude returned invalid JSON: {e}\nRaw: {raw[:200]}")
-
-
-def _ol_get(url: str) -> dict:
-    """Makes a GET request to the Open Library API and returns the JSON response.
-    Sets a Folio User-Agent header as Open Library requires identification."""
-    req = urllib.request.Request(url, headers={"User-Agent": "Folio/1.0"})
-    with urllib.request.urlopen(req, timeout=6) as resp:
-        return json.loads(resp.read())
 
 
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Folio", version="0.1.0")
 
@@ -239,23 +153,19 @@ class ReadingStateRequest(BaseModel):
 
 
 class BookSearchResult(BaseModel):
-    """One result from GET /books/search — could be from our catalog or Open Library."""
-    id: Optional[str]       # None if the book isn't in our catalog yet
+    """One result from GET /books/search — catalog only."""
+    id: str
     title: str
     author: Optional[str]
     cover_url: Optional[str]
     pub_year: Optional[int]
-    in_catalog: bool        # True = already in our DB; False = from Open Library
-    ol_key: Optional[str]   # Open Library work key (e.g. "/works/OL123W"), used to fetch description
+    in_catalog: bool = True
 
 
-class FindOrCreateBookRequest(BaseModel):
-    """Body for POST /books/find-or-create — minimal book metadata from the frontend."""
+class BookRequestBody(BaseModel):
+    """Body for POST /books/request — a title the user wants added to the catalog."""
     title: str
     author: Optional[str] = None
-    cover_url: Optional[str] = None
-    pub_year: Optional[int] = None
-    ol_key: Optional[str] = None   # if provided, we fetch the description from Open Library
 
 
 # ---------------------------------------------------------------------------
@@ -400,23 +310,17 @@ def _generate_why_text(
 
 @app.get("/books/search", response_model=list[BookSearchResult])
 async def search_books(q: str, limit: int = 8):
-    """Search for books by title. Returns up to `limit` results from two sources:
+    """Search for books by title within the Folio catalog.
 
-    1. Our Supabase catalog (ilike search on title) — shown first.
-       These books already have need tags and can be logged immediately.
-    2. Open Library API — fills remaining slots if the catalog doesn't have enough matches.
-       These results have id=None and in_catalog=False; selecting one triggers find-or-create.
-
-    Results from both sources are deduped by title (case-insensitive).
-    Open Library is queried with their search.json endpoint, requesting only
-    the fields we need (key, title, author_name, cover_i, first_publish_year).
+    Returns only books already in our catalog — these have need tags and can
+    be logged immediately. No external API calls are made at request time.
+    If the user's book isn't found, the frontend shows a 'Request this book'
+    button which calls POST /books/request.
     """
     if len(q.strip()) < 2:
         return []
 
     db = get_supabase()
-
-    # Search our catalog first — these results come back with real IDs
     catalog = (
         db.table("books")
         .select("id, title, author, cover_url, pub_year")
@@ -425,132 +329,29 @@ async def search_books(q: str, limit: int = 8):
         .execute()
         .data
     )
-    catalog_titles = {r["title"].lower() for r in catalog}
-    results: list[dict] = [
-        {**r, "in_catalog": True, "ol_key": None} for r in catalog
-    ]
-
-    # Fill remaining slots from Open Library (live external API call)
-    remaining = limit - len(results)
-    if remaining > 0:
-        try:
-            qs = urllib.parse.urlencode({
-                "q": q, "limit": remaining + 5,  # fetch a few extra to account for dedup
-                "fields": "key,title,author_name,cover_i,first_publish_year",
-            })
-            data = _ol_get(f"https://openlibrary.org/search.json?{qs}")
-            for doc in data.get("docs", []):
-                title = doc.get("title", "")
-                if title.lower() in catalog_titles:
-                    continue  # skip duplicates already in our catalog
-                authors = doc.get("author_name", [])
-                cover_i = doc.get("cover_i")
-                results.append({
-                    "id": None,   # not in our DB yet
-                    "title": title,
-                    "author": ", ".join(authors[:2]) if authors else None,
-                    "cover_url": f"https://covers.openlibrary.org/b/id/{cover_i}-M.jpg" if cover_i else None,
-                    "pub_year": doc.get("first_publish_year"),
-                    "in_catalog": False,
-                    "ol_key": doc.get("key"),  # e.g. "/works/OL123W"
-                })
-                catalog_titles.add(title.lower())
-                if len(results) >= limit:
-                    break
-        except Exception:
-            pass  # If Open Library is down, just return catalog results
-
-    return results[:limit]
+    return [{**r, "in_catalog": True} for r in catalog]
 
 
 # ---------------------------------------------------------------------------
 # Endpoint: Find or create a book (adds to catalog + tags via Claude)
 # ---------------------------------------------------------------------------
 
-@app.post("/books/find-or-create")
-async def find_or_create_book(body: FindOrCreateBookRequest):
-    """Ensure a book exists in our catalog. Called when the user selects a book
-    from the onboarding search that isn't already in our DB (in_catalog=False).
+@app.post("/books/request", status_code=202)
+async def request_book(
+    body: BookRequestBody,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Record a user's request to add a book to the catalog.
 
-    Steps:
-      1. Check if a book with this title already exists (ilike match to handle
-         minor differences in capitalisation).
-      2. If not, fetch its description from Open Library using the ol_key.
-      3. Insert the book into the 'books' table.
-      4. Tag the book with Claude Haiku (assign 0–1 weights for all 13 needs).
-      5. Insert the tags into 'book_need_tags' so it can be scored immediately.
+    Does not perform any tagging or external API calls at request time.
+    The nightly_ingest.py job processes pending requests in batch.
 
-    Returns the book row (id, title, author, cover_url).
-    Tagging errors are silently swallowed — the book is still usable, just
-    without need tags until the tags are added in a background process.
+    Returns 202 Accepted immediately — the book will appear in the catalog
+    within 24 hours once the nightly job runs.
     """
     db = get_supabase()
-
-    # Return existing book if we already have it (avoid duplicates)
-    existing = (
-        db.table("books")
-        .select("id, title, author, cover_url, pub_year")
-        .ilike("title", body.title)
-        .limit(1)
-        .execute()
-        .data
-    )
-    if existing:
-        return existing[0]
-
-    # Fetch the book description from Open Library if we have a work key.
-    # The description field can be a plain string or a {"type","value"} object.
-    description: Optional[str] = None
-    if body.ol_key:
-        try:
-            work = _ol_get(f"https://openlibrary.org{body.ol_key}.json")
-            raw = work.get("description")
-            description = raw.get("value") if isinstance(raw, dict) else raw
-        except Exception:
-            pass  # description is optional; scoring still works without it
-
-    # Insert the book with whatever metadata we have
-    row = {
-        "title": body.title,
-        "author": body.author,
-        "cover_url": body.cover_url,
-        "pub_year": body.pub_year,
-        "description": description,
-    }
-    result = db.table("books").insert(row).execute()
-    if not result.data:
-        raise HTTPException(status_code=500, detail="Failed to create book")
-
-    book = result.data[0]
-    book_id = book["id"]
-
-    # Tag the new book with Claude Haiku — this runs synchronously because the
-    # user is about to log this book and we need the tags for scoring to work.
-    try:
-        tags = _tag_book(get_anthropic(), body.title, body.author or "", description or "")
-        has_perpetrator = tags.pop("has_perpetrator", None)
-        tag_rows = []
-        for code, weight in tags.items():
-            need_id = NEED_CODE_TO_ID.get(code)
-            if not need_id:
-                continue
-            w = round(max(0.0, min(1.0, float(weight))), 3)
-            if w == 0.0:
-                continue  # don't store zero-weight tags
-            entry = {"book_id": book_id, "need_id": need_id, "weight": w, "source": "llm"}
-            # has_perpetrator is stored only on the wound_visible tag
-            if code == "wound_visible" and has_perpetrator is not None:
-                entry["has_perpetrator"] = has_perpetrator
-            tag_rows.append(entry)
-        if tag_rows:
-            db.table("book_need_tags").insert(tag_rows).execute()
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Book saved but tagging failed — retry to tag it: {str(e)}",
-        )
-
-    return book
+    db.rpc("upsert_book_request", {"p_title": body.title, "p_author": body.author or ""}).execute()
+    return {"status": "requested", "message": "We'll add this book within 24 hours."}
 
 
 # ---------------------------------------------------------------------------

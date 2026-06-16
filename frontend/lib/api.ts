@@ -48,18 +48,14 @@ export interface WishlistItem {
   need_ids_matched: number[] | null
 }
 
-// One result from the book search endpoint.
-// in_catalog=true means it's already in our DB with need tags.
-// in_catalog=false means it came from Open Library and must be created first.
-// ol_key is the Open Library work key used to fetch the description on creation.
+// One result from GET /books/search — always from our catalog.
 export interface BookSearchResult {
-  id: string | null       // null if not yet in our catalog
+  id: string
   title: string
   author: string | null
   cover_url: string | null
   pub_year: number | null
-  in_catalog: boolean
-  ol_key: string | null   // e.g. "/works/OL123W"
+  in_catalog: true
 }
 
 // ---------------------------------------------------------------------------
@@ -123,21 +119,13 @@ export async function searchBooks(q: string): Promise<BookSearchResult[]> {
   return res.json()
 }
 
-// Add a book to our catalog if it doesn't already exist.
-// The backend fetches the description from Open Library and tags it with Claude Haiku.
-// No auth needed — adding books to the shared catalog is a public operation.
-export async function findOrCreateBook(book: {
-  title: string
-  author: string | null
-  cover_url: string | null
-  pub_year: number | null
-  ol_key: string | null
-}): Promise<{ id: string; title: string; author: string | null; cover_url: string | null }> {
-  const res = await fetch(`${API_URL}/books/find-or-create`, {
+// Request a book be added to the catalog (processed by the nightly ingest job).
+// Requires auth — all users have an anonymous session so this is always available.
+export async function requestBook(title: string, author: string | null): Promise<void> {
+  const headers = await authHeaders()
+  await fetch(`${API_URL}/books/request`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(book),
+    headers,
+    body: JSON.stringify({ title, author }),
   })
-  if (!res.ok) throw new Error('Failed to find or create book')
-  return res.json()
 }
